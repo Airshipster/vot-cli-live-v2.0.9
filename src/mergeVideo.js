@@ -153,11 +153,15 @@ export async function createVideoWithTranslation(
 
   try {
     // Скачиваем оригинальное видео
-    console.log("Скачивание видео...");
+    if (!process.env.VOT_CLI_QUIET) {
+      console.log("Скачивание видео...");
+    }
     videoPath = await downloadYouTubeVideo(videoUrl, tempDir, proxyUrl);
 
     // Объединяем с переводом
-    console.log("Объединение видео с переводом...");
+    if (!process.env.VOT_CLI_QUIET) {
+      console.log("Объединение видео с переводом...");
+    }
     await mergeVideoWithAudio(videoPath, audioPath, outputPath, mergeOptions);
 
     // Удаляем временное видео
@@ -165,7 +169,9 @@ export async function createVideoWithTranslation(
       fs.unlinkSync(videoPath);
     }
 
-    console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
+    if (!process.env.VOT_CLI_QUIET) {
+      console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
+    }
   } catch (error) {
     // Очистка временных файлов при ошибке
     if (videoPath && fs.existsSync(videoPath)) {

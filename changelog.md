@@ -1,3 +1,63 @@
+# 1.7.5 (2024-12-17 - Quiet & JSON Output Modes + Translation Polling)
+
+## ✨ New Features
+
+- **Добавлен флаг `--quiet`** (Issue #1)
+  - Минимальный вывод: только ссылка на аудио (или путь к видео если --merge-video) в stdout
+  - Ошибки выводятся в stderr
+  - Идеально для использования в скриптах и конвейерах (pipes)
+  - Пример: `vot_audio=$(vot-cli-live --quiet "$url")`
+  - Пример с merge: `video=$(vot-cli-live --quiet --merge-video "$url")`
+  
+- **Добавлен флаг `--json`**
+  - Структурированный JSON вывод для программной обработки
+  - Содержит: url, platform, videoTitle, success, audioUrl, error, voiceType
+  - При --merge-video добавляется: mergedVideoPath, mergedVideoSize
+  - Идеально для интеграции с другими инструментами
+  - Пример: `vot-cli-live --json "$url" | jq '.[] | select(.success) | .audioUrl'`
+
+- **Реализован polling mechanism для переводов**
+  - Автоматическое ожидание когда перевод будет готов (до 5 минут)
+  - Показывает прогресс: "⏳ Translation in progress... (30s elapsed, attempt 3/30)"
+  - Интервал между попытками: 10 секунд
+  - Работает для всех платформ (особенно важно для VK)
+
+## 🐛 Bug Fixes
+
+- Исправлен вывод в quiet/json режимах (отключен listr UI)
+- Добавлена переменная окружения `VOT_CLI_QUIET` для дочерних модулей
+- Исправлен exit code в quiet режиме (0 если хотя бы одно видео успешно)
+
+## 📝 Documentation
+
+- Обновлён README с примерами использования `--quiet` и `--json`
+- Добавлены use cases для mpv, vlc и других плееров
+- Обновлена таблица "Что нового в этом форке"
+
+## 🎯 Use Cases
+
+**Для mpv:**
+```bash
+url="https://www.youtube.com/watch?v=VIDEO_ID"
+vot_audio=$(vot-cli-live --quiet "$url")
+mpv "$url" --external-file="$vot_audio"
+```
+
+**Для автоматизации:**
+```bash
+vot-cli-live --json "$url" | jq '.[] | select(.success) | .audioUrl'
+```
+
+## 🎊 Benefits
+
+- ✅ Удобная интеграция с внешними плеерами (mpv, vlc)
+- ✅ Простое использование в bash/python скриптах
+- ✅ Автоматическое ожидание перевода (не нужно запускать команду повторно)
+- ✅ Чистый вывод без лишней информации для скриптов
+- ✅ Структурированные данные для программной обработки
+
+---
+
 # 1.7.4 (2024-12-17 - Live Voices Platform Support Fix)
 
 ## 🐛 Bug Fixes

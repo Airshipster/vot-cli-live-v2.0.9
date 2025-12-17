@@ -15,7 +15,9 @@ export default async function getVideoDuration(videoUrl, proxyData = null) {
     try {
       await execAsync("yt-dlp --version", { timeout: 5000 });
     } catch (error) {
-      console.warn("⚠️  yt-dlp not found, using default duration (341s)");
+      if (!process.env.VOT_CLI_QUIET) {
+        console.warn("⚠️  yt-dlp not found, using default duration (341s)");
+      }
       return 341; // Возвращаем дефолтное значение
     }
 
@@ -46,14 +48,20 @@ export default async function getVideoDuration(videoUrl, proxyData = null) {
     const duration = parseInt(stdout.trim(), 10);
     
     if (isNaN(duration) || duration <= 0) {
-      console.warn("⚠️  Could not parse video duration, using default (341s)");
+      if (!process.env.VOT_CLI_QUIET) {
+        console.warn("⚠️  Could not parse video duration, using default (341s)");
+      }
       return 341;
     }
     
-    console.log(`✓ Video duration: ${duration}s (${Math.floor(duration / 60)}m ${duration % 60}s)`);
+    if (!process.env.VOT_CLI_QUIET) {
+      console.log(`✓ Video duration: ${duration}s (${Math.floor(duration / 60)}m ${duration % 60}s)`);
+    }
     return duration;
   } catch (error) {
-    console.warn("⚠️  Failed to get video duration:", error.message);
+    if (!process.env.VOT_CLI_QUIET) {
+      console.warn("⚠️  Failed to get video duration:", error.message);
+    }
     return 341; // Возвращаем дефолтное значение при ошибке
   }
 }

@@ -21,6 +21,7 @@
 | 📝 **Smart Filenames** | Automatic naming by video title (e.g., `Rick_Astley_-_Never_Gonna_Give_You_Up.mp3`) | ✅ Working |
 | 🎬 **Video Merging** | `--merge-video` parameter to create video with embedded translation | ⚠️ Experimental |
 | 🔊 **Volume Control** | `--translation-volume` and `--original-volume` parameters | ✅ Working |
+| 🤖 **Output Modes** | `--quiet` for scripts (URL only), `--json` for programmatic processing | ✅ Working |
 | 📚 **Complete Documentation** | Wiki with 1200+ lines, examples and FAQ | ✅ Ready |
 
 ---
@@ -51,6 +52,23 @@ vot-cli-live --output="." --merge-video --keep-original-audio=false "https://www
 # Volume control: quiet original (30%), loud translation (150%)
 vot-cli-live --output="." --merge-video --original-volume=0.3 --translation-volume=1.5 "https://www.youtube.com/watch?v=VIDEO_ID"
 # Perfect for language learning: hear original in background + clear translation
+
+# 🤖 For scripts and automation:
+# Get only audio URL (for mpv, vlc and other players)
+vot-cli-live --quiet "https://www.youtube.com/watch?v=VIDEO_ID"
+# Output: https://vtrans.s3-private.mds.yandex.net/...
+
+# Get video path with translation (if using --merge-video)
+vot-cli-live --quiet --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
+# Output: ./Video_Title.mp4
+
+# Get JSON with full information (for programmatic processing)
+vot-cli-live --json "https://www.youtube.com/watch?v=VIDEO_ID"
+# Output: [{"url":"...","audioUrl":"...","success":true,"voiceType":"live"}]
+
+# JSON with merge-video includes mergedVideoPath and mergedVideoSize
+vot-cli-live --json --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
+# Output: [{"url":"...","audioUrl":"...","mergedVideoPath":"./Video.mp4","mergedVideoSize":"45.2","success":true}]
 ```
 
 ---
@@ -93,6 +111,8 @@ A small script that allows you to download an audio translation from Yandex via 
 - `--translation-volume` — set translation audio volume (0.0-2.0. Default: 1.0)
 - `--original-volume` — set original audio volume (0.0-2.0. Default: 1.0)
 - `--proxy` — set HTTP or HTTPS proxy in the format `[<PROTOCOL>://]<USERNAME>:<PASSWORD>@<HOST>[:<port>]`
+- `--quiet` — minimal output: only audio URL (or video path if --merge-video) to stdout, errors to stderr (for scripts and pipes)
+- `--json` — JSON output: structured data for programmatic processing (url, audioUrl, success, voiceType, error, mergedVideoPath, mergedVideoSize)
 
 ### Options:
 

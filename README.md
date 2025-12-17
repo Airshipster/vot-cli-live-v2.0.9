@@ -21,6 +21,7 @@
 | 📝 **Умные названия файлов** | Автоматическое именование по названию видео (например: `Rick_Astley_-_Never_Gonna_Give_You_Up.mp3`) | ✅ Работает |
 | 🎬 **Объединение видео** | Параметр `--merge-video` для создания видео с встроенным переводом | ⚠️ Экспериментально |
 | 🔊 **Настройка громкости** | Параметры `--translation-volume` и `--original-volume` | ✅ Работает |
+| 🤖 **Режимы вывода** | `--quiet` для скриптов (только ссылка), `--json` для программной обработки | ✅ Работает |
 | 📚 **Полная документация** | Wiki на 1200+ строк с примерами и FAQ | ✅ Готово |
 
 ---
@@ -51,6 +52,23 @@ vot-cli-live --output="." --merge-video --keep-original-audio=false "https://www
 # Настройка громкости: тихий оригинал (30%), громкий перевод (150%)
 vot-cli-live --output="." --merge-video --original-volume=0.3 --translation-volume=1.5 "https://www.youtube.com/watch?v=VIDEO_ID"
 # Идеально для изучения языка: слышишь оригинал на фоне + чёткий перевод
+
+# 🤖 Для скриптов и автоматизации:
+# Получить только ссылку на аудио (для mpv, vlc и других плееров)
+vot-cli-live --quiet "https://www.youtube.com/watch?v=VIDEO_ID"
+# Результат: https://vtrans.s3-private.mds.yandex.net/...
+
+# Получить путь к видео с переводом (если используется --merge-video)
+vot-cli-live --quiet --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
+# Результат: ./Video_Title.mp4
+
+# Получить JSON с полной информацией (для программной обработки)
+vot-cli-live --json "https://www.youtube.com/watch?v=VIDEO_ID"
+# Результат: [{"url":"...","audioUrl":"...","success":true,"voiceType":"live"}]
+
+# JSON с merge-video содержит дополнительно mergedVideoPath и mergedVideoSize
+vot-cli-live --json --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
+# Результат: [{"url":"...","audioUrl":"...","mergedVideoPath":"./Video.mp4","mergedVideoSize":"45.2","success":true}]
 ```
 
 ---
@@ -96,6 +114,8 @@ English version: [Link](https://github.com/fantomcheg/vot-cli-live/blob/main/REA
 - `--translation-volume` — установить громкость перевода (0.0-2.0. По умолчанию: 1.0)
 - `--original-volume` — установить громкость оригинала (0.0-2.0. По умолчанию: 1.0)
 - `--proxy` — установить HTTP или HTTPS прокси в формате `[<PROTOCOL>://]<USERNAME>:<PASSWORD>@<HOST>[:<port>]`
+- `--quiet` — минимальный вывод: только ссылка на аудио (или путь к видео если --merge-video) в stdout, ошибки в stderr (для использования в скриптах и конвейерах)
+- `--json` — JSON вывод: структурированные данные для программной обработки (url, audioUrl, success, voiceType, error, mergedVideoPath, mergedVideoSize)
 
 ### Опции:
 
