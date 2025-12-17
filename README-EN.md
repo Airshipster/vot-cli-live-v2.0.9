@@ -84,8 +84,12 @@ A small script that allows you to download an audio translation from Yandex via 
 - `--lang` — set the source video language (see [Wiki - Working with Languages](https://github.com/fantomcheg/vot-cli-live/wiki/Home#-работа-с-языками) for supported languages)
 - `--reslang` — set the language of the received audio file (see [Wiki - Working with Languages](https://github.com/fantomcheg/vot-cli-live/wiki/Home#-работа-с-языками) for supported languages)
 - `--voice-style` — set voice style (tts - standard TTS, live - live voices. Default: live)
+  - **Note:** Live voices work best with YouTube, Twitch, Vimeo
+  - For other platforms (VK, OK.ru), TTS is used automatically for better compatibility
+- `--force-live-voices` — force live voices even for unsupported platforms (may fail. Default: false)
 - `--merge-video` — merge video with translation audio (⚠️ experimental, requires yt-dlp and ffmpeg, may take a long time)
 - `--keep-original-audio` — keep original audio when merging (mix with translation. Default: true)
+- `--normalize-audio` — normalize audio levels for consistent volume (uses dynaudnorm. Default: true)
 - `--translation-volume` — set translation audio volume (0.0-2.0. Default: 1.0)
 - `--original-volume` — set original audio volume (0.0-2.0. Default: 1.0)
 - `--proxy` — set HTTP or HTTPS proxy in the format `[<PROTOCOL>://]<USERNAME>:<PASSWORD>@<HOST>[:<port>]`

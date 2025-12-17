@@ -42,8 +42,11 @@ vot-cli-live --output="." --merge-video --keep-original-audio=false "https://www
 
 ### Настройка громкости
 ```bash
-# Тихий оригинал, громкий перевод
+# Тихий оригинал, громкий перевод (с автоматической нормализацией)
 vot-cli-live --output="." --merge-video --original-volume=0.3 --translation-volume=1.5 "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Без нормализации громкости (быстрее, но может быть неравномерная громкость)
+vot-cli-live --output="." --merge-video --normalize-audio=false --original-volume=0.3 --translation-volume=1.5 "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 ---

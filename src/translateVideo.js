@@ -63,6 +63,13 @@ export default async function translateVideo(
         case 2:
           callback(false, "The translation will take a few minutes");
           return;
+        case 7:
+          // Status 7 обычно означает "перевод недоступен" или "не поддерживается"
+          callback(false, translateResponse.message || "Translation not available for this video");
+          return;
+        default:
+          callback(false, `Unknown translation status: ${translateResponse.status}. Message: ${translateResponse.message || 'none'}`);
+          return;
       }
     },
     useLiveVoices, // передаем параметр useLiveVoices

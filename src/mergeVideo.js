@@ -85,6 +85,7 @@ async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {
     keepOriginalAudio = true,
     audioVolume = 1.0,
     translationVolume = 1.0,
+    normalizeAudio = true,
   } = options;
 
   // Проверяем наличие ffmpeg
@@ -97,8 +98,25 @@ async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {
   let command;
 
   if (keepOriginalAudio) {
-    // Микшируем оригинальное аудио с переводом
-    command = `ffmpeg -i "${videoPath}" -i "${audioPath}" -filter_complex "[0:a]volume=${audioVolume}[a1];[1:a]volume=${translationVolume}[a2];[a1][a2]amix=inputs=2:duration=longest[aout]" -map 0:v -map "[aout]" -c:v copy -c:a aac -b:a 192k -y "${outputPath}"`;
+    // Улучшенный профиль микширования с weights и dynaudnorm
+    // Используем weights вместо volume для более корректного микширования
+    const weight1 = audioVolume;          // вес оригинала (0.0-2.0)
+    const weight2 = translationVolume;    // вес перевода (0.0-2.0)
+    
+    if (normalizeAudio) {
+      // С динамической нормализацией громкости (рекомендуется)
+      // dynaudnorm автоматически выравнивает громкость для комфортного прослушивания
+      command = `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
+        `-c:v copy -map 0:v:0 ` +
+        `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[m];[m]dynaudnorm=framelen=30:gausssize=31:maxgain=12[aout]" ` +
+        `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
+    } else {
+      // Без нормализации (быстрее, но может быть неравномерная громкость)
+      command = `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
+        `-c:v copy -map 0:v:0 ` +
+        `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[aout]" ` +
+        `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
+    }
   } else {
     // Заменяем оригинальное аудио на перевод
     command = `ffmpeg -i "${videoPath}" -i "${audioPath}" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -y "${outputPath}"`;

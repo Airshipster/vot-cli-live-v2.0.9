@@ -3,6 +3,7 @@ test/youtube/*
 test-media
 test/*.mp3
 test/*.mp4
+test-audio-v1.7.3/
 
 .vscode
 .pytest_cache
@@ -139,3 +140,5 @@ dist/*.proxy.user.js
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+*.mp3
+*.mp4
