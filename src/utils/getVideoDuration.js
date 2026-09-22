@@ -23,14 +23,14 @@ export default async function getVideoDuration(videoUrl, proxyData = null) {
 
     // Получаем длительность через yt-dlp
     let command = `yt-dlp --print duration`;
-    
+
     // Добавляем прокси если указан
     if (proxyData?.proxyUrl) {
       command += ` --proxy "${proxyData.proxyUrl}"`;
     }
-    
+
     command += ` "${videoUrl}"`;
-    
+
     const env = proxyData?.proxyUrl
       ? {
           ...process.env,
@@ -42,20 +42,24 @@ export default async function getVideoDuration(videoUrl, proxyData = null) {
           all_proxy: proxyData.proxyUrl,
         }
       : process.env;
-    
+
     const { stdout } = await execAsync(command, { timeout: 30000, env });
-    
+
     const duration = parseInt(stdout.trim(), 10);
-    
+
     if (isNaN(duration) || duration <= 0) {
       if (!process.env.VOT_CLI_QUIET) {
-        console.warn("⚠️  Could not parse video duration, using default (341s)");
+        console.warn(
+          "⚠️  Could not parse video duration, using default (341s)",
+        );
       }
       return 341;
     }
-    
+
     if (!process.env.VOT_CLI_QUIET) {
-      console.log(`✓ Video duration: ${duration}s (${Math.floor(duration / 60)}m ${duration % 60}s)`);
+      console.log(
+        `✓ Video duration: ${duration}s (${Math.floor(duration / 60)}m ${duration % 60}s)`,
+      );
     }
     return duration;
   } catch (error) {

@@ -6,20 +6,21 @@ import { dirname, join } from "path";
 import chalk from "chalk";
 import parseArgs from "minimist";
 import { Listr } from "listr2";
+import undici from "undici";
 import { v4 as uuidv4 } from "uuid";
+import VOTClient from "@vot.js/node";
+import { getVideoData as getVotVideoData } from "@vot.js/node/utils/videoData";
+import { VOTAgent, VOTProxyAgent } from "@vot.js/node/utils/fetchAgent";
 
-import { 
-  availableLangs, 
+import {
+  availableLangs,
   additionalTTS,
   liveVoicesSupportedPlatforms,
 } from "./config/constants.js";
 import validate from "./utils/validator.js";
 import getVideoId from "./utils/getVideoId.js";
-import translateVideo from "./translateVideo.js";
 import downloadFile from "./download.js";
 import { clearFileName } from "./utils/utils.js";
-import yandexRequests from "./yandexRequests.js";
-import yandexProtobuf from "./yandexProtobuf.js";
 import parseProxy from "./proxy.js";
 import coursehunterUtils from "./utils/coursehunter.js";
 import { createVideoWithTranslation } from "./mergeVideo.js";
@@ -28,7 +29,9 @@ import getVideoTitle from "./utils/getVideoTitle.js";
 // Автоматически читаем версию из package.json
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const packageJson = JSON.parse(fs.readFileSync(join(__dirname, "../package.json"), "utf8"));
+const packageJson = JSON.parse(
+  fs.readFileSync(join(__dirname, "../package.json"), "utf8"),
+);
 const version = packageJson.version;
 const HELP_MESSAGE = `
 A small script that allows you to download an audio translation from Yandex via the terminal.
@@ -42,8 +45,10 @@ Args:
   --lang — Set the source video language
   --reslang — Set the audio track language (You can see all supported languages in the documentation. Default: ru)
   --voice-style — Set voice style (tts - standard TTS, live - live voices/живые голоса. Default: live)
-                  Note: Live voices work best with YouTube, Twitch, Vimeo
+                  Note: Live voices require --api-token and work only for English to Russian
                   For other platforms (VK, OK.ru), TTS is used automatically
+  --api-token — Yandex OAuth token required for live voices (or YANDEX_OAUTH_TOKEN environment variable)
+  --translation-timeout — Maximum translation wait time in seconds (Default: 3600)
   --force-live-voices — Try live voices even for unsupported platforms (may fail. Default: false)
   --merge-video — Merge video with translation audio (requires yt-dlp and ffmpeg)
   --keep-original-audio — Keep original audio when merging (mix with translation. Default: true)
@@ -69,8 +74,35 @@ let proxyData = false;
 
 // ARG PARSER
 const argv = parseArgs(process.argv.slice(2), {
-  boolean: ["merge-video", "keep-original-audio", "normalize-audio", "force-live-voices", "subs", "subtitles", "subs-srt", "subtitles-srt", "help", "h", "version", "v", "force-proxy", "quiet", "json"],
-  string: ["output", "output-file", "lang", "reslang", "voice-style", "proxy", "translation-volume", "original-volume"],
+  boolean: [
+    "merge-video",
+    "keep-original-audio",
+    "normalize-audio",
+    "force-live-voices",
+    "subs",
+    "subtitles",
+    "subs-srt",
+    "subtitles-srt",
+    "help",
+    "h",
+    "version",
+    "v",
+    "force-proxy",
+    "quiet",
+    "json",
+  ],
+  string: [
+    "output",
+    "output-file",
+    "lang",
+    "reslang",
+    "voice-style",
+    "proxy",
+    "translation-volume",
+    "original-volume",
+    "api-token",
+    "translation-timeout",
+  ],
 });
 
 const ARG_LINKS = argv._;
@@ -91,15 +123,35 @@ const TRANSLATION_VOLUME = parseFloat(argv["translation-volume"]) || 1.0;
 const ORIGINAL_VOLUME = parseFloat(argv["original-volume"]) || 1.0;
 const QUIET_MODE = argv.quiet ?? false;
 const JSON_MODE = argv.json ?? false;
+const API_TOKEN =
+  argv["api-token"] ||
+  process.env.YANDEX_OAUTH_TOKEN ||
+  process.env.YANDEX_API_TOKEN;
+const TRANSLATION_TIMEOUT_SECONDS = Number.parseInt(
+  argv["translation-timeout"] ?? "3600",
+  10,
+);
 
 // Set environment variable for child modules
 if (QUIET_MODE || JSON_MODE) {
-  process.env.VOT_CLI_QUIET = '1';
+  process.env.VOT_CLI_QUIET = "1";
 }
 
 // Validate conflicting flags
 if (QUIET_MODE && JSON_MODE) {
-  console.error(chalk.red("❌ Cannot use --quiet and --json together. Choose one."));
+  console.error(
+    chalk.red("❌ Cannot use --quiet and --json together. Choose one."),
+  );
+  process.exit(1);
+}
+
+if (
+  !Number.isFinite(TRANSLATION_TIMEOUT_SECONDS) ||
+  TRANSLATION_TIMEOUT_SECONDS < 30
+) {
+  console.error(
+    chalk.red("❌ --translation-timeout must be at least 30 seconds."),
+  );
   process.exit(1);
 }
 
@@ -124,16 +176,28 @@ const processedResults = [];
 if (argv["voice-style"] !== undefined) {
   const voiceStyleValue = argv["voice-style"].toLowerCase();
   if (voiceStyleValue === "tts" || voiceStyleValue === "live") {
-    USE_LIVE_VOICES = (voiceStyleValue === "live");
-    log(chalk.cyan(`🎤 Voice style is set to ${USE_LIVE_VOICES ? "live voices (живые голоса) 🔥" : "standard TTS 🤖"}`));
+    USE_LIVE_VOICES = voiceStyleValue === "live";
+    log(
+      chalk.cyan(
+        `🎤 Voice style is set to ${USE_LIVE_VOICES ? "live voices (живые голоса) 🔥" : "standard TTS 🤖"}`,
+      ),
+    );
   } else {
-    logError(chalk.yellow("⚠️  Invalid voice-style value. Using default (live - live voices)"));
+    logError(
+      chalk.yellow(
+        "⚠️  Invalid voice-style value. Using default (live - live voices)",
+      ),
+    );
   }
 }
 
 if (availableLangs.includes(argv.lang)) {
   REQUEST_LANG = argv.lang;
-  log(chalk.cyan(`🌐 Request language is set to ${chalk.bold(REQUEST_LANG.toUpperCase())}`));
+  log(
+    chalk.cyan(
+      `🌐 Request language is set to ${chalk.bold(REQUEST_LANG.toUpperCase())}`,
+    ),
+  );
 }
 
 if (
@@ -141,14 +205,22 @@ if (
   (Boolean(IS_SUBS_REQ) && argv.reslang)
 ) {
   RESPONSE_LANG = argv.reslang;
-  log(chalk.cyan(`🗣️  Response language is set to ${chalk.bold(RESPONSE_LANG.toUpperCase())}`));
+  log(
+    chalk.cyan(
+      `🗣️  Response language is set to ${chalk.bold(RESPONSE_LANG.toUpperCase())}`,
+    ),
+  );
 }
 
 if (PROXY_STRING) {
   log(chalk.cyan(`🌍 Parsing proxy configuration...`));
   proxyData = parseProxy(PROXY_STRING);
   if (proxyData) {
-    log(chalk.green(`✅ Proxy configured: ${proxyData.host}:${proxyData.port || 'default'}`));
+    log(
+      chalk.green(
+        `✅ Proxy configured: ${proxyData.host}:${proxyData.port || "default"}`,
+      ),
+    );
   } else {
     logError(chalk.red(`❌ Failed to parse proxy configuration`));
   }
@@ -162,170 +234,130 @@ if (FORCE_PROXY && !proxyData) {
   );
 }
 
+const fetchOpts = {
+  dispatcher: proxyData?.proxyUrl
+    ? new VOTProxyAgent(proxyData.proxyUrl)
+    : new VOTAgent(),
+};
+const votClient = new VOTClient({
+  apiToken: API_TOKEN,
+  fetchFn: undici.fetch,
+  fetchOpts,
+});
+
 // TASKS - renderer будет установлен позже в зависимости от режима
 let tasks;
 
-const translate = async (finalURL, task, useLiveVoices = USE_LIVE_VOICES) => {
-  const MAX_RETRIES = 30; // максимум 30 попыток (5 минут при интервале 10 сек)
-  const RETRY_INTERVAL = 10000; // 10 секунд между попытками
+const sleep = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const getErrorMessage = (error) => {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error || "Unknown translation error");
+};
+
+const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES) => {
+  const startedAt = Date.now();
+  const deadline = startedAt + TRANSLATION_TIMEOUT_SECONDS * 1000;
   let attempt = 0;
-  
-  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  while (attempt < MAX_RETRIES) {
-    let translateData;
-    let needsRetry = false;
-
+  while (Date.now() < deadline) {
+    attempt += 1;
     try {
-      await translateVideo(
-        finalURL,
-        REQUEST_LANG,
-        RESPONSE_LANG,
-        null,
-        proxyData,
-        (success, urlOrError) => {
-          if (success) {
-            if (!urlOrError) {
-              translateData = {
-                success: false,
-                urlOrError: "The response doesn't contain a download link",
-              };
-              return;
-            }
-
-            task.title = "Video translated successfully.";
-            if (!QUIET_MODE && !JSON_MODE) {
-              console.info(`Audio Link (${finalURL}): "${chalk.gray(urlOrError)}"`);
-            }
-            translateData = {
-              success,
-              urlOrError,
-            };
-
-            return;
-          }
-
-          if (urlOrError === "The translation will take a few minutes") {
-            needsRetry = true;
-            attempt++;
-            const elapsed = Math.floor((attempt * RETRY_INTERVAL) / 1000);
-            task.title = `⏳ Translation in progress... (${elapsed}s elapsed, attempt ${attempt}/${MAX_RETRIES})`;
-            translateData = {
-              success: false,
-              urlOrError: urlOrError,
-              needsRetry: true,
-            };
-          } else {
-            translateData = {
-              success: false,
-              urlOrError: urlOrError || "Translation failed",
-            };
-          }
+      const result = await votClient.translateVideo({
+        videoData,
+        requestLang: REQUEST_LANG,
+        responseLang: RESPONSE_LANG,
+        extraOpts: {
+          useLivelyVoice: useLiveVoices,
         },
-        useLiveVoices, // передаем параметр live voices
-      );
-    } catch (e) {
+      });
+
+      if (result.translated && result.url) {
+        task.title = "Video translated successfully.";
+        log(`Audio Link (${videoData.url}): "${chalk.gray(result.url)}"`);
+        return {
+          success: true,
+          urlOrError: result.url,
+        };
+      }
+
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      const suggestedDelay = Number(result.remainingTime) || 30;
+      const retryDelaySeconds = Math.min(30, Math.max(5, suggestedDelay));
+      task.title = `⏳ Translation in progress... (${elapsedSeconds}s elapsed, attempt ${attempt})`;
+      await sleep(retryDelaySeconds * 1000);
+    } catch (error) {
       return {
         success: false,
-        urlOrError: e.message,
-      };
-    }
-
-    // Если получили успешный результат или ошибку (не требующую повтора)
-    if (translateData && !needsRetry) {
-      return translateData;
-    }
-
-    // Если нужен повтор и не достигли лимита попыток
-    if (needsRetry && attempt < MAX_RETRIES) {
-      task.title = `⏳ Waiting ${RETRY_INTERVAL / 1000}s before next attempt...`;
-      await sleep(RETRY_INTERVAL);
-      continue;
-    }
-
-    // Если достигли лимита попыток
-    if (attempt >= MAX_RETRIES) {
-      return {
-        success: false,
-        urlOrError: "Translation timeout: exceeded maximum wait time (5 minutes)",
+        urlOrError: getErrorMessage(error),
       };
     }
   }
 
   return {
     success: false,
-    urlOrError: "Translation failed: no response from Yandex API",
+    urlOrError: `Translation timeout: exceeded ${TRANSLATION_TIMEOUT_SECONDS} seconds`,
   };
 };
 
-const fetchSubtitles = async (finalURL, task) => {
-  let subtitlesData;
-
+const fetchSubtitles = async (videoData, task) => {
   try {
-    await yandexRequests.requestVideoSubtitles(
-      finalURL,
-      REQUEST_LANG,
-      proxyData,
-      (success, response) => {
-        if (!success) {
-          throw new Error(chalk.red("Failed to get Yandex subtitles"));
+    const subtitlesResponse = await votClient.getSubtitles({
+      videoData,
+      requestLang: REQUEST_LANG,
+    });
+    const subtitles = (subtitlesResponse.subtitles ?? []).reduce(
+      (result, item) => {
+        if (
+          item.language &&
+          item.url &&
+          !result.some(
+            (entry) =>
+              entry.language === item.language && !entry.translatedFromLanguage,
+          )
+        ) {
+          result.push({
+            source: "yandex",
+            language: item.language,
+            url: item.url,
+          });
         }
-
-        const subtitlesResponse =
-          yandexProtobuf.decodeSubtitlesResponse(response);
-
-        let subtitles = subtitlesResponse.subtitles ?? [];
-        subtitles = subtitles.reduce((result, yaSubtitlesObject) => {
-          if (
-            yaSubtitlesObject.language &&
-            !result.find((e) => {
-              if (
-                e.source === "yandex" &&
-                e.language === yaSubtitlesObject.language &&
-                !e.translatedFromLanguage
-              ) {
-                return e;
-              }
-            })
-          ) {
-            result.push({
-              source: "yandex",
-              language: yaSubtitlesObject.language,
-              url: yaSubtitlesObject.url,
-            });
-          }
-          if (yaSubtitlesObject.translatedLanguage) {
-            result.push({
-              source: "yandex",
-              language: yaSubtitlesObject.translatedLanguage,
-              translatedFromLanguage: yaSubtitlesObject.language,
-              url: yaSubtitlesObject.translatedUrl,
-            });
-          }
-          return result;
-        }, []);
-
-        task.title = "Subtitles for the video have been received.";
-        console.info(
-          `Subtitles response (${finalURL}): "${chalk.gray(
-            JSON.stringify(subtitles, null, 2),
-          )}"`,
-        );
-
-        subtitlesData = {
-          success: true,
-          subsOrError: subtitles,
-        };
+        if (item.translatedLanguage && item.translatedUrl) {
+          result.push({
+            source: "yandex",
+            language: item.translatedLanguage,
+            translatedFromLanguage: item.language,
+            url: item.translatedUrl,
+          });
+        }
+        return result;
       },
+      [],
     );
-  } catch (e) {
+
+    if (subtitles.length === 0) {
+      throw new Error("No subtitles returned by Yandex");
+    }
+
+    task.title = "Subtitles for the video have been received.";
+    log(
+      `Subtitles response (${videoData.url}): "${chalk.gray(
+        JSON.stringify(subtitles, null, 2),
+      )}"`,
+    );
+    return {
+      success: true,
+      subsOrError: subtitles,
+    };
+  } catch (error) {
     return {
       success: false,
-      subsOrError: e.message,
+      subsOrError: getErrorMessage(error),
     };
   }
-
-  return subtitlesData;
 };
 
 async function main() {
@@ -343,26 +375,52 @@ async function main() {
   tasks = new Listr([], {
     concurrent: true,
     exitOnError: false,
-    renderer: (QUIET_MODE || JSON_MODE) ? 'silent' : 'default',
+    renderer: QUIET_MODE || JSON_MODE ? "silent" : "default",
   });
 
   // Красивый баннер при запуске (только в обычном режиме)
   if (!QUIET_MODE && !JSON_MODE) {
-    console.log(chalk.cyan('\n╔═══════════════════════════════════════════════════════════╗'));
-    console.log(chalk.cyan('║') + chalk.bold.white('        🎬 VOT-CLI with Live Voices 🔥                ') + chalk.cyan('║'));
-    console.log(chalk.cyan('╚═══════════════════════════════════════════════════════════╝'));
-    console.log(chalk.gray('  Это форк продукта https://github.com/FOSWLY/vot-cli/'));
-    console.log(chalk.gray('  Вся слава Илье @ToilOfficial 🙏\n'));
-    
+    console.log(
+      chalk.cyan(
+        "\n╔═══════════════════════════════════════════════════════════╗",
+      ),
+    );
+    console.log(
+      chalk.cyan("║") +
+        chalk.bold.white(
+          "        🎬 VOT-CLI with Live Voices 🔥                ",
+        ) +
+        chalk.cyan("║"),
+    );
+    console.log(
+      chalk.cyan(
+        "╚═══════════════════════════════════════════════════════════╝",
+      ),
+    );
+    console.log(
+      chalk.gray("  Это форк продукта https://github.com/FOSWLY/vot-cli/"),
+    );
+    console.log(chalk.gray("  Вся слава Илье @ToilOfficial 🙏\n"));
+
     console.log(chalk.gray(`📦 Version: ${version}`));
     console.log(chalk.gray(`🎯 Videos to process: ${ARG_LINKS.length}`));
     if (MERGE_VIDEO) {
-      console.log(chalk.yellow(`🎬 Video merge mode: ${chalk.bold('ENABLED')}`));
-      console.log(chalk.gray(`   ├─ Original volume: ${ORIGINAL_VOLUME * 100}%`));
-      console.log(chalk.gray(`   ├─ Translation volume: ${TRANSLATION_VOLUME * 100}%`));
-      console.log(chalk.gray(`   └─ Audio normalization: ${NORMALIZE_AUDIO ? chalk.green('ON') + ' 🎚️' : chalk.yellow('OFF')}`));
+      console.log(
+        chalk.yellow(`🎬 Video merge mode: ${chalk.bold("ENABLED")}`),
+      );
+      console.log(
+        chalk.gray(`   ├─ Original volume: ${ORIGINAL_VOLUME * 100}%`),
+      );
+      console.log(
+        chalk.gray(`   ├─ Translation volume: ${TRANSLATION_VOLUME * 100}%`),
+      );
+      console.log(
+        chalk.gray(
+          `   └─ Audio normalization: ${NORMALIZE_AUDIO ? chalk.green("ON") + " 🎚️" : chalk.yellow("OFF")}`,
+        ),
+      );
     }
-    console.log('');
+    console.log("");
   }
 
   if (Boolean(OUTPUT_DIR) && !fs.existsSync(OUTPUT_DIR)) {
@@ -373,7 +431,7 @@ async function main() {
     } catch {
       throw new Error(chalk.red("❌ Invalid output directory"));
     }
-  } else if (Boolean(OUTPUT_DIR)) {
+  } else if (OUTPUT_DIR) {
     log(chalk.green(`✅ Output directory exists: ${OUTPUT_DIR}\n`));
   }
 
@@ -425,45 +483,94 @@ async function main() {
                   }
                   parent.finalURL = finalURL;
                   parent.serviceHost = service.host;
+                  parent.videoData = await getVotVideoData(finalURL);
                   if (!QUIET_MODE && !JSON_MODE) {
                     console.log(chalk.gray(`   └─ URL: ${finalURL}`));
                     console.log(chalk.gray(`   └─ Platform: ${service.host}`));
                   }
-                  
+
                   // Проверяем поддержку live voices для данной платформы
                   parent.useLiveVoices = USE_LIVE_VOICES;
-                  
-                  if (USE_LIVE_VOICES && !liveVoicesSupportedPlatforms.includes(service.host)) {
+
+                  if (parent.useLiveVoices && !API_TOKEN) {
                     if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(chalk.yellow(`   └─ ⚠️  Live voices not officially supported for ${service.host}`));
+                      console.log(
+                        chalk.yellow(
+                          `   └─ ⚠️  Live voices require --api-token; using TTS`,
+                        ),
+                      );
                     }
-                    
+                    parent.useLiveVoices = false;
+                  }
+
+                  if (
+                    parent.useLiveVoices &&
+                    (REQUEST_LANG !== "en" || RESPONSE_LANG !== "ru")
+                  ) {
+                    if (!QUIET_MODE && !JSON_MODE) {
+                      console.log(
+                        chalk.yellow(
+                          `   └─ ⚠️  Live voices support only en → ru; using TTS`,
+                        ),
+                      );
+                    }
+                    parent.useLiveVoices = false;
+                  }
+
+                  if (
+                    parent.useLiveVoices &&
+                    !liveVoicesSupportedPlatforms.includes(service.host)
+                  ) {
+                    if (!QUIET_MODE && !JSON_MODE) {
+                      console.log(
+                        chalk.yellow(
+                          `   └─ ⚠️  Live voices not officially supported for ${service.host}`,
+                        ),
+                      );
+                    }
+
                     if (FORCE_LIVE_VOICES) {
                       if (!QUIET_MODE && !JSON_MODE) {
-                        console.log(chalk.yellow(`      Trying anyway due to --force-live-voices flag...`));
+                        console.log(
+                          chalk.yellow(
+                            `      Trying anyway due to --force-live-voices flag...`,
+                          ),
+                        );
                       }
                       parent.useLiveVoices = true;
                       parent.shouldFallbackToTTS = true; // Если не сработает, попробуем TTS
                     } else {
                       if (!QUIET_MODE && !JSON_MODE) {
-                        console.log(chalk.cyan(`      Using standard TTS instead (better compatibility)`));
+                        console.log(
+                          chalk.cyan(
+                            `      Using standard TTS instead (better compatibility)`,
+                          ),
+                        );
                       }
                       parent.useLiveVoices = false;
                     }
                   }
-                  
+
                   // Получаем название видео для имени файла
                   try {
                     if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(chalk.cyan(`   └─ 📺 Fetching video title...`));
+                      console.log(
+                        chalk.cyan(`   └─ 📺 Fetching video title...`),
+                      );
                     }
                     parent.videoTitle = await getVideoTitle(finalURL);
                     if (parent.videoTitle && !QUIET_MODE && !JSON_MODE) {
-                      console.log(chalk.green(`   └─ ✅ Title: "${parent.videoTitle}"`));
+                      console.log(
+                        chalk.green(`   └─ ✅ Title: "${parent.videoTitle}"`),
+                      );
                     }
                   } catch (e) {
                     if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(chalk.yellow(`   └─ ⚠️  Could not fetch title, using video ID`));
+                      console.log(
+                        chalk.yellow(
+                          `   └─ ⚠️  Could not fetch title, using video ID`,
+                        ),
+                      );
                     }
                     parent.videoTitle = null;
                   }
@@ -474,82 +581,48 @@ async function main() {
                 enabled: !IS_SUBS_REQ,
                 exitOnError: false,
                 task: async (ctxSub, subtask) => {
-                  // ! TODO: НЕ РАБОТАЕТ ЕСЛИ ВИДЕО НЕ ИМЕЕТ ПЕРЕВОДА
-                  await new Promise(async (resolve, reject) => {
-                    try {
-                      let result;
-                      const MAX_RETRIES = 10; // Максимум 10 попыток (5 минут)
-                      const RETRY_INTERVAL = 30000; // 30 секунд между попытками
-                      let retryCount = 0;
-                      
-                      const voiceType = parent.useLiveVoices ? 'live voices 🔥' : 'TTS 🤖';
-                      subtask.title = `🎤 Translating (ID: ${videoId}) with ${voiceType}`;
+                  let result;
+                  const voiceType = parent.useLiveVoices
+                    ? "live voices 🔥"
+                    : "TTS 🤖";
+                  subtask.title = `🎤 Translating (ID: ${videoId}) with ${voiceType}`;
 
-                      if (!QUIET_MODE && !JSON_MODE) {
-                        console.log(chalk.cyan(`   └─ 📡 Requesting translation from Yandex API...`));
-                      }
-                      result = await translate(parent.finalURL, subtask, parent.useLiveVoices);
-                      
-                      // Проверяем нужен ли fallback на TTS
-                      if (!result.success && parent.shouldFallbackToTTS && parent.useLiveVoices) {
-                        if (!QUIET_MODE && !JSON_MODE) {
-                          console.log(chalk.yellow(`   └─ ⚠️  Live voices failed, retrying with TTS...`));
-                        }
-                        parent.useLiveVoices = false;
-                        subtask.title = `🎤 Translating (ID: ${videoId}) with TTS 🤖 (fallback)`;
-                        result = await translate(parent.finalURL, subtask, false);
-                      }
-                      
-                      // console.log("transalting", result)
-                      if (typeof result !== "object") {
-                        if (!QUIET_MODE && !JSON_MODE) {
-                          console.log(chalk.yellow(`   └─ ⏳ Translation is being prepared, waiting...`));
-                        }
-                        await new Promise(async (resolve, reject) => {
-                          const intervalId = setInterval(async () => {
-                            retryCount++;
-                            if (retryCount > MAX_RETRIES) {
-                              clearInterval(intervalId);
-                              const errorMsg = `Translation timeout after ${MAX_RETRIES} attempts (${(MAX_RETRIES * RETRY_INTERVAL) / 60000} minutes). Try again later.`;
-                              subtask.title = `❌ ${errorMsg}`;
-                              reject(new Error(errorMsg));
-                              return;
-                            }
-                            
-                            subtask.title = `🎤 Translating (ID: ${videoId}) - attempt ${retryCount}/${MAX_RETRIES} ⏰`;
-                            if (!QUIET_MODE && !JSON_MODE) {
-                              console.log(chalk.gray(`   └─ ⏳ Retry ${retryCount}/${MAX_RETRIES} (waiting ${RETRY_INTERVAL / 1000}s)...`));
-                            }
-                            // console.log("interval...", result)
-                            result = await translate(parent.finalURL, subtask, parent.useLiveVoices);
-                            if (typeof result === "object") {
-                              // console.log("finished", parent.translateResult)
-                              clearInterval(intervalId);
-                              if (!QUIET_MODE && !JSON_MODE) {
-                                console.log(chalk.green(`   └─ ✅ Translation ready!`));
-                              }
-                              resolve(result);
-                            }
-                          }, RETRY_INTERVAL);
-                        });
-                      } else {
-                        if (!QUIET_MODE && !JSON_MODE) {
-                          console.log(chalk.green(`   └─ ✅ Translation received instantly (cached)`));
-                        }
-                      }
-                      // console.log("translated", result)
-                      parent.translateResult = result;
-                      if (!result.success) {
-                        subtask.title = `❌ ${result.urlOrError}`;
-                      } else {
-                        const finalVoiceType = parent.useLiveVoices ? 'live voices 🔥' : 'TTS 🤖';
-                        subtask.title = `✅ Translated successfully with ${finalVoiceType}`;
-                      }
-                      resolve(result);
-                    } catch (e) {
-                      reject(e);
-                    }
-                  });
+                  log(
+                    chalk.cyan(
+                      `   └─ 📡 Requesting translation from Yandex API...`,
+                    ),
+                  );
+                  result = await translate(
+                    parent.videoData,
+                    subtask,
+                    parent.useLiveVoices,
+                  );
+
+                  if (
+                    !result.success &&
+                    parent.shouldFallbackToTTS &&
+                    parent.useLiveVoices
+                  ) {
+                    log(
+                      chalk.yellow(
+                        `   └─ ⚠️  Live voices failed, retrying with TTS...`,
+                      ),
+                    );
+                    parent.useLiveVoices = false;
+                    subtask.title = `🎤 Translating (ID: ${videoId}) with TTS 🤖 (fallback)`;
+                    result = await translate(parent.videoData, subtask, false);
+                  }
+
+                  parent.translateResult = result;
+                  if (!result.success) {
+                    subtask.title = `❌ ${result.urlOrError}`;
+                    throw new Error(result.urlOrError);
+                  }
+
+                  const finalVoiceType = parent.useLiveVoices
+                    ? "live voices 🔥"
+                    : "TTS 🤖";
+                  subtask.title = `✅ Translated successfully with ${finalVoiceType}`;
                 },
               },
               {
@@ -557,19 +630,15 @@ async function main() {
                 enabled: Boolean(IS_SUBS_REQ),
                 exitOnError: false,
                 task: async (ctxSub, subtask) => {
-                  await new Promise(async (resolve, reject) => {
-                    try {
-                      let result;
-                      result = await fetchSubtitles(parent.finalURL, subtask);
-                      parent.translateResult = result;
-                      if (!result.success) {
-                        subtask.title = result.urlOrError;
-                      }
-                      resolve(result);
-                    } catch (e) {
-                      reject(e);
-                    }
-                  });
+                  const result = await fetchSubtitles(
+                    parent.videoData,
+                    subtask,
+                  );
+                  parent.translateResult = result;
+                  if (!result.success) {
+                    subtask.title = `❌ ${result.subsOrError}`;
+                    throw new Error(result.subsOrError);
+                  }
                 },
               },
               {
@@ -600,12 +669,18 @@ async function main() {
                     : parent.videoTitle
                       ? `${parent.videoTitle}.mp3`
                       : `${clearFileName(videoId)}---${uuidv4()}.mp3`;
-                  
+
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.cyan(`   └─ 💾 Saving as: ${chalk.bold(filename)}`));
-                    console.log(chalk.gray(`   └─ 🔗 Source: ${parent.translateResult.urlOrError.substring(0, 60)}...`));
+                    console.log(
+                      chalk.cyan(`   └─ 💾 Saving as: ${chalk.bold(filename)}`),
+                    );
+                    console.log(
+                      chalk.gray(
+                        `   └─ 🔗 Source: ${parent.translateResult.urlOrError.substring(0, 60)}...`,
+                      ),
+                    );
                   }
-                  
+
                   await downloadFile(
                     parent.translateResult.urlOrError,
                     `${OUTPUT_DIR}/${filename}`,
@@ -613,14 +688,18 @@ async function main() {
                     `(ID: ${videoId} as ${filename})`,
                   )
                     .then(() => {
-                      const fileSize = fs.statSync(`${OUTPUT_DIR}/${filename}`).size;
+                      parent.downloadedPath = `${OUTPUT_DIR}/${filename}`;
+                      const fileSize = fs.statSync(parent.downloadedPath).size;
                       const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
                       subtask.title = `✅ Audio downloaded! (${fileSizeMB} MB)`;
                       if (!QUIET_MODE && !JSON_MODE) {
-                        console.log(chalk.green(`   └─ ✅ File size: ${fileSizeMB} MB`));
+                        console.log(
+                          chalk.green(`   └─ ✅ File size: ${fileSizeMB} MB`),
+                        );
                       }
                     })
                     .catch((e) => {
+                      parent.outputError = e.message;
                       subtask.title = `❌ Error. Download ${taskSubTitle} failed! Reason: ${e.message}`;
                     });
                 },
@@ -671,9 +750,11 @@ async function main() {
                     `(ID: ${videoId} as ${filename})`,
                   )
                     .then(() => {
+                      parent.downloadedPath = `${OUTPUT_DIR}/${filename}`;
                       subtask.title = `Download ${taskSubTitle} completed!`;
                     })
                     .catch((e) => {
+                      parent.outputError = e.message;
                       subtask.title = `Error. Download ${taskSubTitle} failed! Reason: ${e.message}`;
                     });
                 },
@@ -681,7 +762,8 @@ async function main() {
               {
                 title: `🎬 Merging video with translation (ID: ${videoId})`,
                 exitOnError: false,
-                enabled: Boolean(OUTPUT_DIR) && Boolean(MERGE_VIDEO) && !IS_SUBS_REQ,
+                enabled:
+                  Boolean(OUTPUT_DIR) && Boolean(MERGE_VIDEO) && !IS_SUBS_REQ,
                 task: async (ctxSub, subtask) => {
                   if (
                     !(
@@ -690,16 +772,24 @@ async function main() {
                     )
                   ) {
                     throw new Error(
-                      chalk.red(
-                        `Merging failed! Audio link not found`,
-                      ),
+                      chalk.red(`Merging failed! Audio link not found`),
                     );
                   }
 
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.cyan(`   └─ 🎥 Starting video merge process...`));
-                    console.log(chalk.gray(`      ├─ Original volume: ${ORIGINAL_VOLUME * 100}%`));
-                    console.log(chalk.gray(`      └─ Translation volume: ${TRANSLATION_VOLUME * 100}%`));
+                    console.log(
+                      chalk.cyan(`   └─ 🎥 Starting video merge process...`),
+                    );
+                    console.log(
+                      chalk.gray(
+                        `      ├─ Original volume: ${ORIGINAL_VOLUME * 100}%`,
+                      ),
+                    );
+                    console.log(
+                      chalk.gray(
+                        `      └─ Translation volume: ${TRANSLATION_VOLUME * 100}%`,
+                      ),
+                    );
                   }
 
                   const audioFilename = OUTPUT_FILE
@@ -710,7 +800,9 @@ async function main() {
                   const audioPath = `${OUTPUT_DIR}/${audioFilename}`;
 
                   const videoFilename = OUTPUT_FILE
-                    ? (OUTPUT_FILE.endsWith(".mp4") ? OUTPUT_FILE : `${OUTPUT_FILE}.mp4`)
+                    ? OUTPUT_FILE.endsWith(".mp4")
+                      ? OUTPUT_FILE
+                      : `${OUTPUT_FILE}.mp4`
                     : parent.videoTitle
                       ? `${parent.videoTitle}.mp4`
                       : `${clearFileName(videoId)}---${uuidv4()}.mp4`;
@@ -718,7 +810,11 @@ async function main() {
 
                   subtask.title = `📥 Downloading audio for merge...`;
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.cyan(`   └─ 📥 Step 1/3: Downloading translation audio...`));
+                    console.log(
+                      chalk.cyan(
+                        `   └─ 📥 Step 1/3: Downloading translation audio...`,
+                      ),
+                    );
                   }
                   await downloadFile(
                     parent.translateResult.urlOrError,
@@ -726,18 +822,32 @@ async function main() {
                     null,
                     null,
                   );
-                  const audioSize = (fs.statSync(audioPath).size / 1024 / 1024).toFixed(2);
+                  const audioSize = (
+                    fs.statSync(audioPath).size /
+                    1024 /
+                    1024
+                  ).toFixed(2);
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.green(`      └─ ✅ Audio downloaded (${audioSize} MB)`));
+                    console.log(
+                      chalk.green(
+                        `      └─ ✅ Audio downloaded (${audioSize} MB)`,
+                      ),
+                    );
                   }
 
                   subtask.title = `🎬 Creating video with translation...`;
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.cyan(`   └─ 🎬 Step 2/3: Merging video with translation...`));
-                    console.log(chalk.gray(`      ├─ This may take several minutes...`));
+                    console.log(
+                      chalk.cyan(
+                        `   └─ 🎬 Step 2/3: Merging video with translation...`,
+                      ),
+                    );
+                    console.log(
+                      chalk.gray(`      ├─ This may take several minutes...`),
+                    );
                     console.log(chalk.gray(`      └─ Video: ${videoFilename}`));
                   }
-                  
+
                   await createVideoWithTranslation(
                     parent.finalURL,
                     audioPath,
@@ -755,24 +865,36 @@ async function main() {
 
                   // Удаляем временный аудио файл
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.cyan(`   └─ 🧹 Step 3/3: Cleaning up temporary files...`));
+                    console.log(
+                      chalk.cyan(
+                        `   └─ 🧹 Step 3/3: Cleaning up temporary files...`,
+                      ),
+                    );
                   }
                   if (fs.existsSync(audioPath)) {
                     fs.unlinkSync(audioPath);
                     if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(chalk.gray(`      └─ ✅ Temporary audio file removed`));
+                      console.log(
+                        chalk.gray(`      └─ ✅ Temporary audio file removed`),
+                      );
                     }
                   }
 
-                  const videoSize = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(2);
+                  const videoSize = (
+                    fs.statSync(videoPath).size /
+                    1024 /
+                    1024
+                  ).toFixed(2);
                   subtask.title = `✅ Video created! (${videoSize} MB) - ${videoFilename}`;
-                  
+
                   // Сохраняем путь к видео для quiet/json режимов
                   parent.mergedVideoPath = videoPath;
                   parent.mergedVideoSize = videoSize;
-                  
+
                   if (!QUIET_MODE && !JSON_MODE) {
-                    console.log(chalk.green(`   └─ ✅ Final video size: ${videoSize} MB`));
+                    console.log(
+                      chalk.green(`   └─ ✅ Final video size: ${videoSize} MB`),
+                    );
                     console.log(chalk.green(`   └─ 📁 Saved to: ${videoPath}`));
                   }
                 },
@@ -781,25 +903,52 @@ async function main() {
                 title: `Finish (ID: ${videoId}).`,
                 task: () => {
                   parent.title = `Translating finished! (ID: ${videoId}).`;
-                  
-                  // Сохраняем результаты для quiet/json режимов
-                  if (QUIET_MODE || JSON_MODE) {
+
+                  // Сохраняем итог каждого задания для вывода и exit code.
+                  {
+                    const translationSuccess =
+                      parent.translateResult?.success || false;
+                    const outputSuccess = !OUTPUT_DIR
+                      ? true
+                      : MERGE_VIDEO && !IS_SUBS_REQ
+                        ? Boolean(parent.mergedVideoPath)
+                        : Boolean(parent.downloadedPath);
+                    const success = translationSuccess && outputSuccess;
+                    const subtitles =
+                      translationSuccess && IS_SUBS_REQ
+                        ? parent.translateResult.subsOrError
+                        : null;
+                    const subtitleUrl = subtitles?.find(
+                      (subtitle) => subtitle.language === RESPONSE_LANG,
+                    )?.url;
                     const result = {
                       url: parent.finalURL,
                       platform: parent.serviceHost,
                       videoTitle: parent.videoTitle,
-                      success: parent.translateResult?.success || false,
-                      audioUrl: parent.translateResult?.success ? parent.translateResult.urlOrError : null,
-                      error: !parent.translateResult?.success ? parent.translateResult?.urlOrError : null,
-                      voiceType: parent.useLiveVoices ? 'live' : 'tts',
+                      success,
+                      audioUrl:
+                        success && !IS_SUBS_REQ
+                          ? parent.translateResult.urlOrError
+                          : null,
+                      subtitles,
+                      subtitleUrl: subtitleUrl || null,
+                      error: success
+                        ? null
+                        : parent.outputError ||
+                          parent.translateResult?.urlOrError ||
+                          parent.translateResult?.subsOrError ||
+                          (translationSuccess
+                            ? "Output file was not created"
+                            : "Unknown error"),
+                      voiceType: parent.useLiveVoices ? "live" : "tts",
                     };
-                    
+
                     // Если создано видео с переводом, добавляем путь к нему
                     if (parent.mergedVideoPath) {
                       result.mergedVideoPath = parent.mergedVideoPath;
                       result.mergedVideoSize = parent.mergedVideoSize;
                     }
-                    
+
                     processedResults.push(result);
                   }
                 },
@@ -819,70 +968,124 @@ async function main() {
 
   try {
     // В quiet/json режиме отключаем listr UI полностью
-    const runOptions = (QUIET_MODE || JSON_MODE) ? { renderer: 'silent' } : {};
-    
+    const runOptions = QUIET_MODE || JSON_MODE ? { renderer: "silent" } : {};
+
     await tasks.run(runOptions);
-    
+
+    const successfulResults = processedResults.filter(
+      (result) => result.success,
+    );
+    const failedResults = processedResults.filter((result) => !result.success);
+    const allFailed =
+      processedResults.length > 0 && successfulResults.length === 0;
+
     // Обработка результатов в зависимости от режима
     if (QUIET_MODE) {
       // В quiet режиме выводим путь к видео (если merge) или ссылку на аудио (stdout) и ошибки (stderr)
-      let hasSuccess = false;
-      let hasError = false;
-      
       for (const result of processedResults) {
         if (result.success) {
           // Если создано видео - выводим путь к видео, иначе ссылку на аудио
           if (result.mergedVideoPath) {
             console.log(result.mergedVideoPath);
+          } else if (result.subtitleUrl) {
+            console.log(result.subtitleUrl);
           } else if (result.audioUrl) {
             console.log(result.audioUrl);
           }
-          hasSuccess = true;
         } else if (!result.success) {
-          console.error(result.error || 'Unknown error');
-          hasError = true;
+          console.error(result.error || "Unknown error");
         }
       }
-      
+
       // Выходим с кодом 1 только если ВСЕ видео failed
-      if (hasError && !hasSuccess) {
-        process.exit(1);
+      if (allFailed) {
+        process.exitCode = 1;
       }
     } else if (JSON_MODE) {
       // В JSON режиме выводим структурированные данные
       console.log(JSON.stringify(processedResults, null, 2));
+      if (allFailed) {
+        process.exitCode = 1;
+      }
     } else {
+      if (allFailed) {
+        console.error("");
+        console.error(chalk.red("❌ No videos were processed successfully."));
+        for (const result of failedResults) {
+          console.error(chalk.red(`   ${result.url}: ${result.error}`));
+        }
+        console.error("");
+        process.exitCode = 1;
+        return;
+      }
+
       // Обычный режим с красивым UI
-      console.log('');
-      console.log(chalk.green('╔═══════════════════════════════════════════════════════════╗'));
-      console.log(chalk.green('║') + chalk.bold.white('            🎉 ALL TASKS COMPLETED! 🎉                 ') + chalk.green('║'));
-      console.log(chalk.green('╚═══════════════════════════════════════════════════════════╝'));
-      console.log('');
-      console.log(chalk.cyan(`✅ Successfully processed ${ARG_LINKS.length} video(s)`));
+      console.log("");
+      console.log(
+        chalk.green(
+          "╔═══════════════════════════════════════════════════════════╗",
+        ),
+      );
+      console.log(
+        chalk.green("║") +
+          chalk.bold.white(
+            "            🎉 ALL TASKS COMPLETED! 🎉                 ",
+          ) +
+          chalk.green("║"),
+      );
+      console.log(
+        chalk.green(
+          "╚═══════════════════════════════════════════════════════════╝",
+        ),
+      );
+      console.log("");
+      console.log(
+        chalk.cyan(
+          `✅ Successfully processed ${successfulResults.length}/${processedResults.length} video(s)`,
+        ),
+      );
       if (OUTPUT_DIR) {
         console.log(chalk.cyan(`📁 Output directory: ${OUTPUT_DIR}`));
       }
-      console.log('');
+      console.log("");
     }
   } catch (e) {
     if (JSON_MODE) {
-      console.log(JSON.stringify({ success: false, error: e.message }, null, 2));
+      console.log(
+        JSON.stringify({ success: false, error: e.message }, null, 2),
+      );
       process.exit(1);
     } else if (QUIET_MODE) {
       console.error(e.message);
       process.exit(1);
     } else {
-      console.error('');
-      console.error(chalk.red('╔═══════════════════════════════════════════════════════════╗'));
-      console.error(chalk.red('║') + chalk.bold.white('                ❌ ERROR OCCURRED ❌                   ') + chalk.red('║'));
-      console.error(chalk.red('╚═══════════════════════════════════════════════════════════╝'));
-      console.error('');
+      console.error("");
+      console.error(
+        chalk.red(
+          "╔═══════════════════════════════════════════════════════════╗",
+        ),
+      );
+      console.error(
+        chalk.red("║") +
+          chalk.bold.white(
+            "                ❌ ERROR OCCURRED ❌                   ",
+          ) +
+          chalk.red("║"),
+      );
+      console.error(
+        chalk.red(
+          "╚═══════════════════════════════════════════════════════════╝",
+        ),
+      );
+      console.error("");
       console.error(e);
-      console.error('');
+      console.error("");
+      process.exitCode = 1;
     }
   }
 }
 
 await main().catch((e) => {
   console.error(chalk.red("[VOT]", e));
+  process.exitCode = 1;
 });

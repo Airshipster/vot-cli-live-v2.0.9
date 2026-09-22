@@ -1,82 +1,47 @@
-# 🚀 Инструкция по публикации vot-cli-live v1.7.0
+# Публикация vot-cli-live 2.0.0
 
-## ✅ Подготовка завершена!
-
-Репозиторий очищен от больших файлов (290MB → 25MB)
-Все коммиты и теги готовы.
-
----
-
-## 📤 Шаг 1: Push на GitHub
+## 1. Проверка
 
 ```bash
-cd /home/xrapid/Projects/vot-cli/vot-cli
-
-# Push ветки (force нужен т.к. переписали историю)
-git push myfork feature/add-live-voices-support --force
-
-# Push тегов
-git push myfork --tags --force
-```
-
----
-
-## 🎯 Шаг 2: Создать Release на GitHub
-
-1. Открой: https://github.com/fantomcheg/vot-cli-live/releases/new
-2. Выбери тег: **v1.7.0**
-3. Title: **v1.7.0 - Major Update: Bug Fixes & Beautiful UI**
-4. Description: Скопируй из файла **RELEASE-NOTES-v1.7.0.md**
-5. Нажми **Publish release**
-
----
-
-## 📦 Шаг 3: Публикация на npm
-
-```bash
-# Проверь что залогинен
-npm whoami
-
-# Если нет, то залогинься
-npm login
-
-# Проверь что будет опубликовано
+npm install
+npm run lint
 npm pack --dry-run
+node src/index.js --version
+```
 
-# Публикуй!
+Проверьте TTS и живые голоса на коротком ролике. Для живых голосов задайте
+`YANDEX_OAUTH_TOKEN`; не сохраняйте токен в файлах проекта.
+
+## 2. Git
+
+```bash
+git add -A
+git commit -m "feat: restore Yandex VOT compatibility in v2.0.0"
+git tag -a v2.0.0 -m "vot-cli-live 2.0.0"
+git push myfork main
+git push myfork v2.0.0
+```
+
+Force push для релиза не нужен.
+
+## 3. npm
+
+```bash
+npm whoami
+npm pack --dry-run
 npm publish
+npm view vot-cli-live@2.0.0 version
 ```
 
----
+## 4. GitHub Release
 
-## ✅ Проверка после публикации
+Создайте релиз из тега `v2.0.0` и используйте текст из
+`RELEASE-NOTES-v2.0.0.md`.
+
+После публикации проверьте чистую установку:
 
 ```bash
-# Проверь что опубликовано
-npm view vot-cli-live
-
-# Установи глобально и протестируй
-npm install -g vot-cli-live
-vot-cli-live --version  # Должно показать 1.7.0
+npm uninstall -g vot-cli-live
+npm install -g vot-cli-live@2.0.0
+vot-cli-live --version
 ```
-
----
-
-## 🎊 Готово!
-
-После публикации:
-- 📦 **npm:** https://www.npmjs.com/package/vot-cli-live
-- 🐙 **GitHub:** https://github.com/fantomcheg/vot-cli-live
-- 🎉 **Release:** https://github.com/fantomcheg/vot-cli-live/releases/tag/v1.7.0
-
----
-
-## ⚠️ Важно
-
-После force push другие разработчики должны сделать:
-```bash
-git fetch myfork
-git reset --hard myfork/feature/add-live-voices-support
-```
-
-Но т.к. ты один работаешь - всё ОК! 👍

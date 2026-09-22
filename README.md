@@ -1,214 +1,164 @@
-## 🎤 VOT-CLI with Live Voices | VOT-CLI с живыми голосами
+# VOT-CLI Live 2.0
 
 [![npm version](https://img.shields.io/npm/v/vot-cli-live)](https://www.npmjs.com/package/vot-cli-live)
-[![npm downloads](https://img.shields.io/npm/dm/vot-cli-live)](https://www.npmjs.com/package/vot-cli-live)
-[![GitHub stars](https://img.shields.io/github/stars/fantomcheg/vot-cli-live)](https://github.com/fantomcheg/vot-cli-live/stargazers)
+[![GitHub](https://img.shields.io/github/stars/fantomcheg/vot-cli-live)](https://github.com/fantomcheg/vot-cli-live)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> ### 🔥 Форк с поддержкой живых голосов Яндекса!
-> 
-> Оригинальный [FOSWLY/vot-cli](https://github.com/FOSWLY/vot-cli) качал только стандартный TTS. 
-> **Эта версия использует живые голоса Яндекса по умолчанию** - озвучка звучит намного естественнее и качественнее!
+CLI для получения перевода видео и субтитров через Yandex VOT. Форк сохраняет
+поддержку живых голосов, JSON/quiet-режимов и сборки готового видео через
+`yt-dlp` + `ffmpeg`.
 
----
+Версия 2.0 переведена со старых ручных protobuf-запросов на актуальную
+библиотеку [`vot.js`](https://github.com/FOSWLY/vot.js). Это исправляет ошибки
+`Translation not available`, HTTP 400 и проблемы запуска новых переводов,
+которые появились после изменений API Яндекса.
 
-## ✨ Что нового в этом форке:
+> Проект предназначен только для исследовательских и личных целей. Он не
+> связан с Яндексом. Все права на исходные сервисы принадлежат их владельцам.
 
-| Фича | Описание | Статус |
-|------|----------|--------|
-| 🎤 **Живые голоса** | Поддержка `useLivelyVoice` - более естественная озвучка от Яндекса | ✅ Работает |
-| 🎚️ **Выбор типа озвучки** | Параметр `--voice-style` (live/tts) для переключения между живыми голосами и TTS | ✅ Работает |
-| 📝 **Умные названия файлов** | Автоматическое именование по названию видео (например: `Rick_Astley_-_Never_Gonna_Give_You_Up.mp3`) | ✅ Работает |
-| 🎬 **Объединение видео** | Параметр `--merge-video` для создания видео с встроенным переводом | ⚠️ Экспериментально |
-| 🔊 **Настройка громкости** | Параметры `--translation-volume` и `--original-volume` | ✅ Работает |
-| 🤖 **Режимы вывода** | `--quiet` для скриптов (только ссылка), `--json` для программной обработки | ✅ Работает |
-| 📚 **Полная документация** | Wiki на 1200+ строк с примерами и FAQ | ✅ Готово |
+## Что важно в 2.0
 
----
+- Обычный TTS работает без авторизации.
+- Живые голоса требуют Yandex OAuth-токен и поддерживаются только для `en → ru`.
+- Без токена CLI автоматически использует обычный TTS и показывает предупреждение.
+- Старые аргументы `--output`, `--output-file` и `--voice-style` сохранены.
+- Ожидание долгих переводов увеличено до 60 минут и настраивается.
 
-## 🚀 Быстрый старт
+## Установка
 
-### Установка:
 ```bash
 npm install -g vot-cli-live
 ```
 
-### Использование:
-```bash
-# Скачать только аудио перевод с живыми голосами (файл назовётся по названию видео)
-vot-cli-live --output="." "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-# Результат: Rick_Astley_-_Never_Gonna_Give_You_Up.mp3
+Требования:
 
-# Скачать со стандартным TTS
-vot-cli-live --output="." --voice-style=tts "https://www.youtube.com/watch?v=VIDEO_ID"
+- Node.js 22.19+;
+- `yt-dlp` — для определения видео и `--merge-video`;
+- `ffmpeg` — только для `--merge-video`.
 
-# Скачать ВИДЕО с встроенным переводом (требует yt-dlp и ffmpeg)
-vot-cli-live --output="." --merge-video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-# Результат: Rick_Astley_-_Never_Gonna_Give_You_Up.mp4 (видео с переводом)
-
-# Видео с переводом БЕЗ оригинального аудио
-vot-cli-live --output="." --merge-video --keep-original-audio=false "https://www.youtube.com/watch?v=VIDEO_ID"
-
-# Настройка громкости: тихий оригинал (30%), громкий перевод (150%)
-vot-cli-live --output="." --merge-video --original-volume=0.3 --translation-volume=1.5 "https://www.youtube.com/watch?v=VIDEO_ID"
-# Идеально для изучения языка: слышишь оригинал на фоне + чёткий перевод
-
-# 🤖 Для скриптов и автоматизации:
-# Получить только ссылку на аудио (для mpv, vlc и других плееров)
-vot-cli-live --quiet "https://www.youtube.com/watch?v=VIDEO_ID"
-# Результат: https://vtrans.s3-private.mds.yandex.net/...
-
-# Получить путь к видео с переводом (если используется --merge-video)
-vot-cli-live --quiet --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
-# Результат: ./Video_Title.mp4
-
-# Получить JSON с полной информацией (для программной обработки)
-vot-cli-live --json "https://www.youtube.com/watch?v=VIDEO_ID"
-# Результат: [{"url":"...","audioUrl":"...","success":true,"voiceType":"live"}]
-
-# JSON с merge-video содержит дополнительно mergedVideoPath и mergedVideoSize
-vot-cli-live --json --merge-video "https://www.youtube.com/watch?v=VIDEO_ID"
-# Результат: [{"url":"...","audioUrl":"...","mergedVideoPath":"./Video.mp4","mergedVideoSize":"45.2","success":true}]
-```
-
----
-
-English version: [Link](https://github.com/fantomcheg/vot-cli-live/blob/main/README-EN.md)
-
-Небольшой скрипт, позволяющий скачать аудио перевод от Яндекса через терминал.
-
-## 📖 Использование
-
-> 💡 **Полная документация:** [Wiki](https://github.com/fantomcheg/vot-cli-live/wiki)  
-> 💡 **Больше примеров:** [EXAMPLES.md](./EXAMPLES.md)  
-> 🔧 **Устранение проблем:** [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)
-
-### Примеры использования:
-
-- `vot-cli [options] [args] <link> [link2] [link3] ...` — общий пример
-- `vot-cli <link>` — получить перевод аудио по ссылке
-- `vot-cli --help` — показать помощь по командам
-- `vot-cli --version` — показать версию скрипта
-- `vot-cli --output=<path> <link>` — получить перевод аудио по ссылке и сохранить его по указаному пути
-- `vot-cli --output=<path> --reslang=en <link>` — получить перевод аудио на английский и сохранить его по указаному пути
-- `vot-cli --output=<path> --voice-style=live <link>` — получить перевод с живыми голосами (по умолчанию)
-- `vot-cli --output=<path> --voice-style=tts <link>` — получить перевод со стандартной озвучкой TTS
-- `vot-cli --output=<path> --merge-video <link>` — скачать видео с встроенным переводом (требует yt-dlp и ffmpeg)
-- `vot-cli --output=<path> --merge-video --keep-original-audio=false <link>` — видео только с переводом (без оригинального аудио)
-- `vot-cli --subs --output=<path> --lang=en <link>` — получить английские субтитры к видео и сохранить их по указанному пути
-- `vot-cli --output="." "https://www.youtube.com/watch?v=X98VPQCE_WI" "https://www.youtube.com/watch?v=djr8j-4fS3A&t=900s"` - пример с реальными данными
-
-### Аргументы:
-
-- `--output` — установить путь сохранения аудио файла перевода
-- `--output-file` — установить имя файла для сохранения (требует указания пути в "--output"). Если не указано, используется название видео с YouTube
-- `--lang` — установить язык исходного видео (см. [Wiki - Работа с языками](https://github.com/fantomcheg/vot-cli-live/wiki/Home#-работа-с-языками), чтобы узнать какие языки поддерживаются)
-- `--reslang` — установить язык полученного аудио файла (см. [Wiki - Работа с языками](https://github.com/fantomcheg/vot-cli-live/wiki/Home#-работа-с-языками), чтобы узнать какие языки поддерживаются)
-- `--voice-style` — установить тип озвучки (tts - стандартный TTS, live - живые голоса. По умолчанию: live)
-  - **Примечание:** Живые голоса лучше всего работают с YouTube, Twitch, Vimeo
-  - Для других платформ (VK, OK.ru) автоматически используется TTS для лучшей совместимости
-- `--force-live-voices` — принудительно использовать живые голоса даже для неподдерживаемых платформ (может не работать. По умолчанию: false)
-- `--merge-video` — объединить видео с аудио переводом (⚠️ экспериментально, требует yt-dlp и ffmpeg, может занять много времени)
-- `--keep-original-audio` — сохранить оригинальное аудио при объединении (микшировать с переводом. По умолчанию: true)
-- `--normalize-audio` — нормализовать уровни громкости для равномерного звучания (использует dynaudnorm. По умолчанию: true)
-- `--translation-volume` — установить громкость перевода (0.0-2.0. По умолчанию: 1.0)
-- `--original-volume` — установить громкость оригинала (0.0-2.0. По умолчанию: 1.0)
-- `--proxy` — установить HTTP или HTTPS прокси в формате `[<PROTOCOL>://]<USERNAME>:<PASSWORD>@<HOST>[:<port>]`
-- `--quiet` — минимальный вывод: только ссылка на аудио (или путь к видео если --merge-video) в stdout, ошибки в stderr (для использования в скриптах и конвейерах)
-- `--json` — JSON вывод: структурированные данные для программной обработки (url, audioUrl, success, voiceType, error, mergedVideoPath, mergedVideoSize)
-
-### Опции:
-
-- `-h`, `--help` — показать помощь по использованию
-- `-v`, `--version` — показать версию скрипта
-- `--subs`, `--subtitles` — получить субтитры к видео вместо аудио (язык субтитров для сохранения берется из `--reslang`)
-- `--subs-srt`, `--subtitles-srt` — получить субтитры в формате `.srt` к видео вместо аудио
-
-## 💻 Установка
-
-### Из npm (рекомендуется):
-
-**Версия с живыми голосами:**
-```bash
-npm install -g vot-cli-live
-```
-
-**Оригинальная версия (без живых голосов):**
-```bash
-npm install -g vot-cli
-```
-
-### Требования:
-- NodeJS 18+
-- yt-dlp (рекомендуется для автоматических названий файлов): `pip install yt-dlp` или `sudo apt install yt-dlp`
-- ffmpeg (для `--merge-video`): `sudo apt install ffmpeg`
-
-> 💡 **Примечание:** Без yt-dlp файлы будут называться по videoId (например: `dQw4w9WgXcQ.mp3`)
-
-## ⚙️ Установка из исходников
-
-1. Установите NodeJS 18+
-2. Клонируйте репозиторий:
+Установка из исходников:
 
 ```bash
 git clone https://github.com/fantomcheg/vot-cli-live.git
 cd vot-cli-live
+npm install
+npm link
 ```
 
-3. Установите зависимости:
+## Быстрый старт
+
+Обычный перевод TTS:
 
 ```bash
-npm install --ignore-scripts
+vot-cli-live --voice-style=tts --output=. "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-4. Установите глобально:
+Перевод живыми голосами:
 
 ```bash
-sudo npm link
+export YANDEX_OAUTH_TOKEN="ваш-токен"
+vot-cli-live --voice-style=live --output=. "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-5. Готово! Теперь команда `vot-cli` доступна в терминале
+Токен также можно передать через `--api-token`, но переменная окружения
+безопаснее: токен не попадёт в историю команд и список процессов.
 
-## 📁 Полезные ссылки
+Получение OAuth-токена описано в
+[официальной документации Яндекс ID](https://yandex.ru/dev/id/doc/ru/tokens/debug-token).
+Не публикуйте токен и не добавляйте его в Git.
 
-1. Версия для браузера: [Ссылка](https://github.com/ilyhalight/voice-over-translation)
-2. Скрипт для скачивания видео с встроенным переводом (надстройка над vot-cli):
-   | OS | Оболочка | Автор | Ссылка |
-   | --- | --- | --- | --- |
-   | Windows | PowerShell | Dragoy | [Ссылка](https://github.com/FOSWLY/vot-cli/tree/main/scripts)
-   | Unix | Fish | Musickiller | [Ссылка](https://gitlab.com/musickiller/fishy-voice-over/)
-   | Linux | Bash | s-n-alexeyev | [Ссылка](https://github.com/s-n-alexeyev/yvt)
-   | Cloud | Google Colab | alex2844 | [Ссылка](https://github.com/alex2844/youtube-translate)
+## Видео с переводом
 
-## 🔧 Устранение проблем
+```bash
+vot-cli-live \
+  --output=. \
+  --merge-video \
+  --original-volume=0.3 \
+  --translation-volume=1.5 \
+  "https://www.youtube.com/watch?v=VIDEO_ID"
+```
 
-Если после обновления `--version` показывает старую версию, или у вас другие проблемы - смотрите:
-📖 **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)** - подробный гайд по решению всех известных проблем
+Без оригинальной дорожки:
 
-### Основные проблемы:
-- ❌ **Старая версия после обновления** → [решение](./TROUBLESHOOTING.md#проблема---version-показывает-старую-версию-после-обновления)
-- ❌ **ECONNRESET ошибки** → [решение](./TROUBLESHOOTING.md#проблема-ошибка-econnreset-при-переводе-видео)
-- ⏰ **Timeout при скачивании** → [решение](./TROUBLESHOOTING.md#проблема-timeout-при-скачиваниеобработке-видео)
-- 🔒 **3 уязвимости при установке** → [решение](./TROUBLESHOOTING.md#проблема-3-уязвимости-после-установки)
+```bash
+vot-cli-live --output=. --merge-video --keep-original-audio=false "URL"
+```
 
-### 📊 Что нового в последних версиях:
+## Автоматизация
 
-#### v1.7.2 (latest) - Documentation
-- ✅ Добавлен **TROUBLESHOOTING.md** (500+ строк)
-- ✅ Решения всех известных проблем
-- ✅ Обновлён README.md
+Только ссылка на аудио или путь к собранному видео:
 
-#### v1.7.0 - Major Update
-- 🐛 Исправлены критические баги (timeout, ECONNRESET)
-- 🎨 Красивый UI с эмоджи и прогресс-барами
-- ⏰ Таймауты для всех операций (60s API, 10m yt-dlp, 15m ffmpeg)
-- 📏 Автоопределение длительности видео
+```bash
+vot-cli-live --quiet "URL"
+```
 
-**Полный changelog:** [changelog.md](./changelog.md) | **Releases:** [GitHub Releases](https://github.com/fantomcheg/vot-cli-live/releases)
+JSON:
 
-## ❗ Примечание
+```bash
+vot-cli-live --json "URL"
+```
 
-1. Оборачивайте ссылки в кавычки, дабы избежать ошибок
-2. Для записи в системный раздел (например на "Диск C" в Windows) необходимы права администратора
+Несколько ссылок можно передать одной команде:
 
-![example btn](https://github.com/FOSWLY/vot-cli/blob/main/img/example.png "example")
+```bash
+vot-cli-live --json "URL_1" "URL_2" "URL_3"
+```
+
+## Субтитры
+
+```bash
+vot-cli-live --subs --output=. --reslang=ru "URL"
+vot-cli-live --subs-srt --output=. --reslang=ru "URL"
+```
+
+## Основные параметры
+
+| Параметр | Назначение |
+| --- | --- |
+| `--output=<путь>` | Каталог сохранения |
+| `--output-file=<имя>` | Имя выходного файла |
+| `--lang=<код>` | Язык исходного видео, по умолчанию `en` |
+| `--reslang=<код>` | Язык перевода, по умолчанию `ru` |
+| `--voice-style=live\|tts` | Тип голоса |
+| `--api-token=<токен>` | OAuth-токен для живых голосов |
+| `--translation-timeout=<сек>` | Максимальное ожидание, по умолчанию `3600` |
+| `--proxy=<URL>` | HTTP/HTTPS-прокси |
+| `--merge-video` | Скачать видео и встроить перевод |
+| `--keep-original-audio` | Смешать оригинал с переводом |
+| `--normalize-audio` | Нормализовать итоговую дорожку |
+| `--original-volume=0..2` | Громкость оригинала |
+| `--translation-volume=0..2` | Громкость перевода |
+| `--quiet` | Вывести только результат |
+| `--json` | Структурированный JSON |
+| `--subs`, `--subs-srt` | Скачать субтитры |
+
+## Ограничения
+
+- API Яндекса не переводит видео длиннее 4 часов. Такие видео нужно заранее
+  разделить на части.
+- Живые голоса доступны только для пары `en → ru` и требуют действующий OAuth.
+- Доступность перевода конкретного видео определяет Яндекс.
+- `--merge-video` зависит от поддержки URL установленной версией `yt-dlp`.
+
+## Диагностика
+
+```bash
+vot-cli-live --version
+node --version
+yt-dlp --version
+ffmpeg -version
+```
+
+Если команда показывает старую версию:
+
+```bash
+npm uninstall -g vot-cli-live
+npm cache clean --force
+npm install -g vot-cli-live@latest
+hash -r
+```
+
+Подробности: [TROUBLESHOOTING.md](./TROUBLESHOOTING.md), история изменений:
+[changelog.md](./changelog.md).
+
+English documentation: [README-EN.md](./README-EN.md).

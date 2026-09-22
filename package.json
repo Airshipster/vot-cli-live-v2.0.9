@@ -1,10 +1,17 @@
 {
   "name": "vot-cli-live",
-  "version": "1.7.5",
-  "description": "VOT-CLI with Yandex live voices support. Fork of FOSWLY/vot-cli with useLivelyVoice feature.",
+  "version": "2.0.0",
+  "description": "VOT-CLI with current Yandex VOT API support, lively voices and video merge.",
   "type": "module",
   "main": "./src/index.js",
   "bin": "./src/index.js",
+  "files": [
+    "src",
+    "README.md",
+    "README-EN.md",
+    "TROUBLESHOOTING.md",
+    "changelog.md"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "lint": "npx eslint .",
@@ -13,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/FOSWLY/vot-cli.git"
+    "url": "git+https://github.com/fantomcheg/vot-cli-live.git"
   },
   "keywords": [
     "cli",
@@ -26,21 +33,22 @@
   "author": "Toil",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/FOSWLY/vot-cli/issues",
+    "url": "https://github.com/fantomcheg/vot-cli-live/issues",
     "email": "me@toil.cc"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.19.0"
   },
   "homepage": "https://github.com/fantomcheg/vot-cli-live/#readme",
   "dependencies": {
-    "axios": "^1.7.2",
+    "@vot.js/node": "2.4.20",
+    "axios": "^1.20.0",
     "chalk": "^5.3.0",
-    "jsdom": "^24.1.0",
+    "jsdom": "^26.1.0",
     "listr2": "^8.2.3",
     "minimist": "^1.2.8",
-    "protobufjs": "^7.3.2",
-    "uuid": "^10.0.0"
+    "undici": "^8.10.2",
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
     "eslint": "^8.56.0",

@@ -1,9 +1,11 @@
 #!/bin/bash
 
-# 🚀 Скрипт для публикации vot-cli-live v1.7.0 на GitHub и npm
+set -euo pipefail
+
+# Скрипт публикации текущей версии vot-cli-live на GitHub и npm.
 
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║     🚀 Publishing vot-cli-live v1.7.0                   ║"
+echo "║              Publishing vot-cli-live                    ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -18,42 +20,31 @@ VERSION=$(node -p "require('./package.json').version")
 echo "📦 Current version: $VERSION"
 echo ""
 
+# Проверяем, что зависимости, lint и содержимое пакета корректны
+echo "🔍 Running checks..."
+npm install
+npm run lint
+npm pack --dry-run
+echo ""
+
 # 1. Push to GitHub
-echo "📤 Step 1/4: Pushing to GitHub..."
-echo "   └─ Branch: feature/add-live-voices-support"
-git push myfork feature/add-live-voices-support
-if [ $? -eq 0 ]; then
-    echo "   └─ ✅ Branch pushed successfully"
-else
-    echo "   └─ ❌ Failed to push branch"
-    exit 1
-fi
+echo "📤 Step 1/3: Pushing main and release tag to GitHub..."
+git push myfork main
+git push myfork "v$VERSION"
 echo ""
 
-# 2. Push tags to GitHub
-echo "📤 Step 2/4: Pushing tags to GitHub..."
-git push myfork --tags
-if [ $? -eq 0 ]; then
-    echo "   └─ ✅ Tags pushed successfully"
-else
-    echo "   └─ ❌ Failed to push tags"
-    exit 1
-fi
-echo ""
-
-# 3. Ask about creating release on GitHub
-echo "🎯 Step 3/4: GitHub Release"
+# 2. Ask about creating release on GitHub
+echo "🎯 Step 2/3: GitHub Release"
 echo "   You can create a release manually at:"
 echo "   └─ https://github.com/fantomcheg/vot-cli-live/releases/new"
-echo "   └─ Tag: v1.7.0"
-echo "   └─ Title: v1.7.0 - Major Update: Bug Fixes & Beautiful UI"
-echo "   └─ Description: Copy from RELEASE-NOTES-v1.7.0.md"
+echo "   └─ Tag: v$VERSION"
+echo "   └─ Description: Copy from RELEASE-NOTES-v$VERSION.md"
 echo ""
 read -p "   Press Enter to continue to npm publish..."
 echo ""
 
-# 4. Publish to npm
-echo "📦 Step 4/4: Publishing to npm..."
+# 3. Publish to npm
+echo "📦 Step 3/3: Publishing to npm..."
 echo "   └─ Package: vot-cli-live"
 echo "   └─ Version: $VERSION"
 echo ""
@@ -75,11 +66,6 @@ if [ $? -ne 0 ]; then
 fi
 
 echo ""
-echo "🔍 Running final checks..."
-echo "   └─ Running npm pack (dry-run)..."
-npm pack --dry-run
-echo ""
-
 read -p "📦 Ready to publish to npm? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -92,7 +78,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "║          🎉 PUBLICATION COMPLETED! 🎉                    ║"
         echo "╚═══════════════════════════════════════════════════════════╝"
         echo ""
-        echo "✅ Version 1.7.0 published!"
+        echo "✅ Version $VERSION published!"
         echo "📦 npm: https://www.npmjs.com/package/vot-cli-live"
         echo "🐙 GitHub: https://github.com/fantomcheg/vot-cli-live"
         echo ""
@@ -109,6 +95,5 @@ fi
 echo ""
 echo "🎯 Next steps:"
 echo "1. Create GitHub release: https://github.com/fantomcheg/vot-cli-live/releases/new"
-echo "2. Update README with new features"
-echo "3. Share on social media! 🎊"
+echo "2. Verify: npm view vot-cli-live@$VERSION version"
 echo ""

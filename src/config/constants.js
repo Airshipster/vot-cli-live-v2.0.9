@@ -37,22 +37,13 @@ const additionalTTS = [
 ];
 
 // Platforms where live voices are officially supported and tested
-const liveVoicesSupportedPlatforms = [
-  "youtube",
-  "twitch",
-  "vimeo",
-];
+const liveVoicesSupportedPlatforms = ["youtube", "twitch", "vimeo"];
 
 // Platforms where live voices are NOT supported (will use TTS instead)
-const liveVoicesUnsupportedPlatforms = [
-  "vk",
-  "ok.ru",
-  "rutube",
-  "mail.ru",
-];
+const liveVoicesUnsupportedPlatforms = ["vk", "ok.ru", "rutube", "mail.ru"];
 
-export { 
-  availableLangs, 
+export {
+  availableLangs,
   additionalTTS,
   liveVoicesSupportedPlatforms,
   liveVoicesUnsupportedPlatforms,

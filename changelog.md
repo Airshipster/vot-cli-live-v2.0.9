@@ -1,3 +1,37 @@
+# 2.0.0 (2026-09-20 - Yandex API compatibility update)
+
+## Breaking API compatibility fix
+
+- Replaced obsolete hand-written protobuf, HMAC, and request headers with
+  `@vot.js/node` 2.4.x, the same maintained API client used by upstream
+  `vot-cli`.
+- Added current Yandex session handling and cold translation startup.
+- Added OAuth authorization for lively voices via `--api-token`,
+  `YANDEX_OAUTH_TOKEN`, or `YANDEX_API_TOKEN`.
+- Lively voices now explicitly support only English to Russian. Without a
+  token or for another language pair, the CLI safely falls back to TTS.
+- Migrated subtitle requests to `vot.js`.
+
+## Reliability
+
+- Translation polling uses Yandex's `remainingTime` hint.
+- Default translation timeout increased from 5 minutes to 60 minutes.
+- Added `--translation-timeout=<seconds>`.
+- Translation and subtitle errors now fail their tasks instead of being
+  reported as a successful completion.
+- Quiet and JSON subtitle output now includes the resulting subtitle URL.
+
+## Maintenance
+
+- Removed obsolete protobuf/request/signature modules and the embedded HMAC
+  configuration.
+- Fixed repository and issue URLs in `package.json`.
+- Replaced outdated README files and publication instructions.
+- Removed stale lockfiles from 1.7.2; regenerate them with `npm install` before
+  publishing.
+
+---
+
 # 1.7.5 (2024-12-17 - Quiet & JSON Output Modes + Translation Polling)
 
 ## ✨ New Features

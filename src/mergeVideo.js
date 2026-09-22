@@ -19,7 +19,7 @@ async function execWithTimeout(command, options = {}, timeoutMs = 600000) {
  */
 async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl) {
   const videoPath = `${outputDir}/temp_video_${Date.now()}.mp4`;
-  
+
   // Проверяем наличие yt-dlp
   try {
     await execWithTimeout("yt-dlp --version", {}, 5000); // 5 секунд на проверку версии
@@ -52,23 +52,27 @@ async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl) {
         all_proxy: proxyUrl,
       }
     : process.env;
-  
+
   try {
     // 10 минут на скачивание видео
     await execWithTimeout(command, { env }, 600000);
   } catch (error) {
-    if (error.killed && error.signal === 'SIGTERM') {
-      throw new Error("yt-dlp timeout: Video download took too long (10 minutes)");
+    if (error.killed && error.signal === "SIGTERM") {
+      throw new Error(
+        "yt-dlp timeout: Video download took too long (10 minutes)",
+      );
     }
     // Если файл скачался но с другим расширением, попробуем найти его
     const dir = path.dirname(videoPath);
-    const files = fs.readdirSync(dir).filter(f => f.startsWith('temp_video_'));
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("temp_video_"));
     if (files.length > 0) {
       return path.join(dir, files[0]);
     }
     throw error;
   }
-  
+
   return videoPath;
 }
 
@@ -80,7 +84,12 @@ async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl) {
  * @param {object} options - дополнительные опции
  * @returns {Promise<void>}
  */
-async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {}) {
+async function mergeVideoWithAudio(
+  videoPath,
+  audioPath,
+  outputPath,
+  options = {},
+) {
   const {
     keepOriginalAudio = true,
     audioVolume = 1.0,
@@ -92,7 +101,9 @@ async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {
   try {
     await execWithTimeout("ffmpeg -version", {}, 5000); // 5 секунд на проверку версии
   } catch (error) {
-    throw new Error("ffmpeg не установлен. Установите: sudo apt install ffmpeg");
+    throw new Error(
+      "ffmpeg не установлен. Установите: sudo apt install ffmpeg",
+    );
   }
 
   let command;
@@ -100,19 +111,21 @@ async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {
   if (keepOriginalAudio) {
     // Улучшенный профиль микширования с weights и dynaudnorm
     // Используем weights вместо volume для более корректного микширования
-    const weight1 = audioVolume;          // вес оригинала (0.0-2.0)
-    const weight2 = translationVolume;    // вес перевода (0.0-2.0)
-    
+    const weight1 = audioVolume; // вес оригинала (0.0-2.0)
+    const weight2 = translationVolume; // вес перевода (0.0-2.0)
+
     if (normalizeAudio) {
       // С динамической нормализацией громкости (рекомендуется)
       // dynaudnorm автоматически выравнивает громкость для комфортного прослушивания
-      command = `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
+      command =
+        `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
         `-c:v copy -map 0:v:0 ` +
         `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[m];[m]dynaudnorm=framelen=30:gausssize=31:maxgain=12[aout]" ` +
         `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
     } else {
       // Без нормализации (быстрее, но может быть неравномерная громкость)
-      command = `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
+      command =
+        `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
         `-c:v copy -map 0:v:0 ` +
         `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[aout]" ` +
         `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
@@ -126,8 +139,10 @@ async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {
     // 15 минут на обработку видео с ffmpeg
     await execWithTimeout(command, {}, 900000);
   } catch (error) {
-    if (error.killed && error.signal === 'SIGTERM') {
-      throw new Error("ffmpeg timeout: Video processing took too long (15 minutes)");
+    if (error.killed && error.signal === "SIGTERM") {
+      throw new Error(
+        "ffmpeg timeout: Video processing took too long (15 minutes)",
+      );
     }
     throw error;
   }
