@@ -1,203 +1,137 @@
-import { exec } from "child_process";
-import { promisify } from "util";
-import fs from "fs";
-import path from "path";
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { createProgress } from "./progress.js";
 
-const execAsync = promisify(exec);
+const executable = (variable, name) =>
+  process.env[variable] || (process.platform === "win32" ? `${name}.exe` : name);
 
-// Обертка для execAsync с таймаутом
-async function execWithTimeout(command, options = {}, timeoutMs = 600000) {
-  const timeout = options.timeout || timeoutMs; // 10 минут по умолчанию
-  return await execAsync(command, { ...options, timeout });
+export async function runTool(file, args, options = {}) {
+  const { onLine, ...execOptions } = options;
+  return new Promise((resolve, reject) => {
+    const child = execFile(file, args, {
+      windowsHide: true, timeout: 600_000, maxBuffer: 16 * 1024 * 1024, encoding: "utf8",
+      ...execOptions,
+    }, (error, stdout, stderr) => {
+      if (!error) { resolve({ stdout, stderr }); return; }
+      const details = error.killed
+        ? "Превышено время ожидания."
+        : String(stderr || error.message).trim().slice(-1800);
+      reject(new Error(`${path.basename(file)}: ${details}`));
+    });
+    if (!onLine) return;
+    for (const stream of [child.stdout, child.stderr]) {
+      let pending = "";
+      stream.on("data", (chunk) => {
+        pending += chunk;
+        const lines = pending.split(/\r?\n|\r/);
+        pending = lines.pop();
+        for (const line of lines) onLine(line);
+      });
+      stream.on("end", () => { if (pending) onLine(pending); });
+    }
+  });
 }
 
-/**
- * Скачивает видео с YouTube используя yt-dlp
- * @param {string} videoUrl - URL видео
- * @param {string} outputPath - путь для сохранения
- * @returns {Promise<string>} - путь к скачанному видео
- */
-async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl) {
-  const videoPath = `${outputDir}/temp_video_${Date.now()}.mp4`;
-
-  // Проверяем наличие yt-dlp
-  try {
-    await execWithTimeout("yt-dlp --version", {}, 5000); // 5 секунд на проверку версии
-  } catch (error) {
-    throw new Error(
-      "yt-dlp не установлен. Установите: pip install yt-dlp или sudo apt install yt-dlp",
-    );
-  }
-
-  // Скачиваем видео в лучшем качестве
-  const commandParts = [
-    "yt-dlp",
-    `-f ${JSON.stringify("best[ext=mp4]/best")}`,
-    "--merge-output-format mp4",
-    `-o ${JSON.stringify(videoPath)}`,
+export async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl, maxHeight = 0, selectedFormat) {
+  const heightFilter = maxHeight ? `[height<=${maxHeight}]` : "";
+  const format = selectedFormat ||
+    `bv${heightFilter}[ext=mp4]+ba[ext=m4a]/bv${heightFilter}+ba/b${heightFilter}`;
+  const videoPath = path.join(outputDir, `temp_video_${Date.now()}.mp4`);
+  const args = [
+    "--ignore-config", "--no-playlist", "--progress", "--newline", "--progress-delta", "1", "--no-simulate",
+    "--progress-template", "download:VOT_PROGRESS:%(info.format_id)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.eta)s|%(progress.fragment_index)s|%(progress.fragment_count)s|%(progress.status)s|%(info.vcodec)s",
+    "--js-runtimes", `node:${process.env.VOT_NODE_EXE || process.execPath}`,
+    "-f", format, "--merge-output-format", "mp4", "--remux-video", "mp4",
+    "--print", "after_move:filepath", "-o", videoPath,
   ];
-  if (proxyUrl) {
-    commandParts.push(`--proxy ${JSON.stringify(proxyUrl)}`);
+  if (process.env.VOT_FFMPEG_EXE) {
+    args.push("--ffmpeg-location", path.dirname(process.env.VOT_FFMPEG_EXE));
   }
-  commandParts.push(JSON.stringify(videoUrl));
-  const command = commandParts.join(" ");
-  const env = proxyUrl
-    ? {
-        ...process.env,
-        HTTP_PROXY: proxyUrl,
-        http_proxy: proxyUrl,
-        HTTPS_PROXY: proxyUrl,
-        https_proxy: proxyUrl,
-        ALL_PROXY: proxyUrl,
-        all_proxy: proxyUrl,
-      }
-    : process.env;
-
+  if (proxyUrl) args.push("--proxy", proxyUrl);
+  args.push(videoUrl);
+  let progress;
+  let currentFormat;
+  let stdout;
   try {
-    // 10 минут на скачивание видео
-    await execWithTimeout(command, { env }, 600000);
-  } catch (error) {
-    if (error.killed && error.signal === "SIGTERM") {
-      throw new Error(
-        "yt-dlp timeout: Video download took too long (10 minutes)",
-      );
-    }
-    // Если файл скачался но с другим расширением, попробуем найти его
-    const dir = path.dirname(videoPath);
-    const files = fs
-      .readdirSync(dir)
-      .filter((f) => f.startsWith("temp_video_"));
-    if (files.length > 0) {
-      return path.join(dir, files[0]);
-    }
-    throw error;
+    ({ stdout } = await runTool(executable("VOT_YTDLP_EXE", "yt-dlp"), args, {
+      onLine(line) {
+        if (!line.startsWith("VOT_PROGRESS:")) return;
+        const [formatId, downloaded, total, estimate, eta, fragment, fragmentCount, status, vcodec] =
+          line.slice("VOT_PROGRESS:".length).split("|");
+        if (formatId !== currentFormat) {
+          progress?.fail();
+          currentFormat = formatId;
+          progress = createProgress(vcodec === "none" ? "Скачивание оригинального звука" : "Скачивание видео");
+        }
+        const totalBytes = Number(total) || Number(estimate);
+        const percent = totalBytes > 0 ? Number(downloaded) / totalBytes * 100
+          : Number(fragmentCount) > 0 ? Number(fragment) / Number(fragmentCount) * 100 : NaN;
+        if (status === "finished") progress.finish();
+        else progress.update(percent, Number(eta));
+      },
+    }));
+  } catch (error) { progress?.fail(); throw error; }
+  const downloadedPath = stdout.trim().split(/\r?\n/).filter((line) => !line.startsWith("VOT_PROGRESS:")).at(-1);
+  const expectedRoot = path.resolve(outputDir) + path.sep;
+  if (!downloadedPath || !path.resolve(downloadedPath).startsWith(expectedRoot) ||
+      !fs.existsSync(downloadedPath) || fs.statSync(downloadedPath).size === 0 ||
+      !downloadedPath.toLowerCase().endsWith(".mp4")) {
+    throw new Error("yt-dlp не создал законченный MP4-файл.");
   }
-
-  return videoPath;
+  return downloadedPath;
 }
 
-/**
- * Объединяет видео и аудио перевод
- * @param {string} videoPath - путь к видео файлу
- * @param {string} audioPath - путь к аудио переводу
- * @param {string} outputPath - путь для сохранения результата
- * @param {object} options - дополнительные опции
- * @returns {Promise<void>}
- */
-async function mergeVideoWithAudio(
-  videoPath,
-  audioPath,
-  outputPath,
-  options = {},
-) {
-  const {
-    keepOriginalAudio = true,
-    audioVolume = 1.0,
-    translationVolume = 1.0,
-    normalizeAudio = true,
-  } = options;
-
-  // Проверяем наличие ffmpeg
-  try {
-    await execWithTimeout("ffmpeg -version", {}, 5000); // 5 секунд на проверку версии
-  } catch (error) {
-    throw new Error(
-      "ffmpeg не установлен. Установите: sudo apt install ffmpeg",
-    );
-  }
-
-  let command;
-
+export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {}) {
+  const { keepOriginalAudio = true, audioVolume = 1, translationVolume = 1, normalizeAudio = true } = options;
+  const { stdout } = await runTool(executable("VOT_FFPROBE_EXE", "ffprobe"), [
+    "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration", "-of", "json", videoPath,
+  ], { timeout: 30_000 });
+  const metadata = JSON.parse(stdout);
+  const duration = Number(metadata.format?.duration);
+  const args = ["-hide_banner", "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1", "-i", videoPath, "-i", audioPath];
   if (keepOriginalAudio) {
-    // Улучшенный профиль микширования с weights и dynaudnorm
-    // Используем weights вместо volume для более корректного микширования
-    const weight1 = audioVolume; // вес оригинала (0.0-2.0)
-    const weight2 = translationVolume; // вес перевода (0.0-2.0)
-
-    if (normalizeAudio) {
-      // С динамической нормализацией громкости (рекомендуется)
-      // dynaudnorm автоматически выравнивает громкость для комфортного прослушивания
-      command =
-        `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
-        `-c:v copy -map 0:v:0 ` +
-        `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[m];[m]dynaudnorm=framelen=30:gausssize=31:maxgain=12[aout]" ` +
-        `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
-    } else {
-      // Без нормализации (быстрее, но может быть неравномерная громкость)
-      command =
-        `ffmpeg -i "${videoPath}" -i "${audioPath}" ` +
-        `-c:v copy -map 0:v:0 ` +
-        `-filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2:weights=${weight1} ${weight2}[aout]" ` +
-        `-map "[aout]" -c:a aac -b:a 192k -y "${outputPath}"`;
+    if (!metadata.streams?.some((stream) => stream.codec_type === "audio")) {
+      throw new Error("Не скачана оригинальная аудиодорожка.");
     }
+    let filter = `[0:a:0]volume=${audioVolume}[original];` +
+      `[1:a:0]volume=${translationVolume}[translation];` +
+      "[original][translation]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]";
+    filter += normalizeAudio
+      ? ";[mixed]dynaudnorm=framelen=30:gausssize=31:maxgain=12[aout]"
+      : ";[mixed]anull[aout]";
+    args.push("-filter_complex", filter, "-map", "0:v:0", "-map", "[aout]");
   } else {
-    // Заменяем оригинальное аудио на перевод
-    command = `ffmpeg -i "${videoPath}" -i "${audioPath}" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -y "${outputPath}"`;
+    args.push("-map", "0:v:0", "-map", "1:a:0", "-af", `volume=${translationVolume}`, "-shortest");
   }
-
+  args.push("-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", outputPath);
+  const progress = createProgress("Сведение озвучки");
+  progress.update(0);
   try {
-    // 15 минут на обработку видео с ffmpeg
-    await execWithTimeout(command, {}, 900000);
-  } catch (error) {
-    if (error.killed && error.signal === "SIGTERM") {
-      throw new Error(
-        "ffmpeg timeout: Video processing took too long (15 minutes)",
-      );
-    }
-    throw error;
-  }
+    await runTool(executable("VOT_FFMPEG_EXE", "ffmpeg"), args, {
+      timeout: 900_000,
+      onLine(line) {
+        if (line.startsWith("out_time_us=") && duration > 0) {
+          progress.update(Number(line.slice("out_time_us=".length)) / 1_000_000 / duration * 100);
+        }
+      },
+    });
+    progress.finish();
+  } catch (error) { progress.fail(); throw error; }
 }
 
-/**
- * Полный процесс: скачивание видео, получение перевода и объединение
- * @param {string} videoUrl - URL видео
- * @param {string} audioPath - путь к аудио переводу
- * @param {string} outputPath - путь для сохранения результата
- * @param {object} options - дополнительные опции
- * @returns {Promise<void>}
- */
-export async function createVideoWithTranslation(
-  videoUrl,
-  audioPath,
-  outputPath,
-  options = {},
-) {
-  const tempDir = path.dirname(outputPath);
-  const { proxyUrl, ...mergeOptions } = options;
+export async function createVideoWithTranslation(videoUrl, audioPath, outputPath, options = {}) {
+  const { proxyUrl, maxHeight = 0, videoFormat, ...mergeOptions } = options;
   let videoPath;
-
   try {
-    // Скачиваем оригинальное видео
-    if (!process.env.VOT_CLI_QUIET) {
-      console.log("Скачивание видео...");
-    }
-    videoPath = await downloadYouTubeVideo(videoUrl, tempDir, proxyUrl);
-
-    // Объединяем с переводом
-    if (!process.env.VOT_CLI_QUIET) {
-      console.log("Объединение видео с переводом...");
-    }
+    if (!process.env.VOT_CLI_QUIET) console.log("Скачивание видео и оригинального звука...");
+    videoPath = await downloadYouTubeVideo(videoUrl, path.dirname(outputPath), proxyUrl, maxHeight, videoFormat);
+    if (!process.env.VOT_CLI_QUIET) console.log("Объединение видео с переводом...");
     await mergeVideoWithAudio(videoPath, audioPath, outputPath, mergeOptions);
-
-    // Удаляем временное видео
-    if (fs.existsSync(videoPath)) {
-      fs.unlinkSync(videoPath);
-    }
-
-    if (!process.env.VOT_CLI_QUIET) {
-      console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
-    }
-  } catch (error) {
-    // Очистка временных файлов при ошибке
-    if (videoPath && fs.existsSync(videoPath)) {
-      fs.unlinkSync(videoPath);
-    }
-    throw error;
+    if (!process.env.VOT_CLI_QUIET) console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
+  } finally {
+    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
   }
 }
 
-export default {
-  downloadYouTubeVideo,
-  mergeVideoWithAudio,
-  createVideoWithTranslation,
-};
+export default { downloadYouTubeVideo, mergeVideoWithAudio, createVideoWithTranslation };

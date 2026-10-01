@@ -25,6 +25,8 @@ import parseProxy from "./proxy.js";
 import coursehunterUtils from "./utils/coursehunter.js";
 import { createVideoWithTranslation } from "./mergeVideo.js";
 import getVideoTitle from "./utils/getVideoTitle.js";
+import { formatDuration } from "./progress.js";
+import { createEdgeAudio } from "./edgeTts.js";
 
 // Автоматически читаем версию из package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -42,15 +44,21 @@ Usage:
 Args:
   --output — Set the directory to download
   --output-file — Set the file name to download (requires specifying a dir to download in "--output" argument)
-  --lang — Set the source video language
+  --lang — Set the source video language, or auto to detect it (Default: auto)
   --reslang — Set the audio track language (You can see all supported languages in the documentation. Default: ru)
-  --voice-style — Set voice style (tts - standard TTS, live - live voices/живые голоса. Default: live)
-                  Note: Live voices require --api-token and work only for English to Russian
+  --voice-style — Set engine (tts - Yandex standard, live - Yandex live voices, edge - Microsoft Edge. Default: live)
+                  Note: Live voices work for English to Russian; authorization is used only if supplied
                   For other platforms (VK, OK.ru), TTS is used automatically
-  --api-token — Yandex OAuth token required for live voices (or YANDEX_OAUTH_TOKEN environment variable)
+  --api-token — Optional Yandex OAuth token (or YANDEX_OAUTH_TOKEN environment variable)
   --translation-timeout — Maximum translation wait time in seconds (Default: 3600)
   --force-live-voices — Try live voices even for unsupported platforms (may fail. Default: false)
   --merge-video — Merge video with translation audio (requires yt-dlp and ffmpeg)
+  --max-height — Maximum video height, e.g. 720 or 1080 (Default: unlimited)
+  --video-format — Exact yt-dlp format selector (overrides --max-height)
+  --video-title — Original title, as supplied by the video player
+  --video-duration — Original duration in seconds, as supplied by the video player
+  --video-metadata — yt-dlp metadata JSON file (used for Microsoft subtitles)
+  --tts-voice — Microsoft voice ID, e.g. ru-RU-SvetlanaNeural (with --voice-style=edge)
   --keep-original-audio — Keep original audio when merging (mix with translation. Default: true)
   --normalize-audio — Normalize audio levels for consistent volume (uses dynaudnorm. Default: true)
   --translation-volume — Set translation audio volume (0.0-2.0. Default: 1.0)
@@ -67,9 +75,10 @@ Options:
 `;
 
 // LANG PAIR
-let REQUEST_LANG = "en";
+let REQUEST_LANG = "auto";
 let RESPONSE_LANG = "ru";
 let USE_LIVE_VOICES = true; // по умолчанию используем живые голоса
+let VOICE_ENGINE = "live";
 let proxyData = false;
 
 // ARG PARSER
@@ -102,6 +111,12 @@ const argv = parseArgs(process.argv.slice(2), {
     "original-volume",
     "api-token",
     "translation-timeout",
+    "max-height",
+    "video-format",
+    "video-title",
+    "video-duration",
+    "video-metadata",
+    "tts-voice",
   ],
 });
 
@@ -116,6 +131,20 @@ const ARG_VERSION = argv.version || argv.v;
 const PROXY_STRING = argv.proxy;
 let FORCE_PROXY = argv["force-proxy"] ?? false;
 const MERGE_VIDEO = argv["merge-video"] === true || argv["merge-video"] === "";
+const MAX_VIDEO_HEIGHT = Number(argv["max-height"] ?? 0);
+const VIDEO_FORMAT = argv["video-format"] || undefined;
+const VIDEO_TITLE = argv["video-title"] || undefined;
+const VIDEO_METADATA = argv["video-metadata"] || undefined;
+const TTS_VOICE = argv["tts-voice"] || undefined;
+const VIDEO_DURATION = argv["video-duration"] === undefined ? undefined : Number(argv["video-duration"]);
+if (VIDEO_DURATION !== undefined && (!Number.isFinite(VIDEO_DURATION) || VIDEO_DURATION <= 0)) {
+  console.error("--video-duration must be a positive number.");
+  process.exit(1);
+}
+if (!Number.isInteger(MAX_VIDEO_HEIGHT) || MAX_VIDEO_HEIGHT < 0 || MAX_VIDEO_HEIGHT > 8640) {
+  console.error("--max-height must be an integer between 0 and 8640.");
+  process.exit(1);
+}
 const KEEP_ORIGINAL_AUDIO = argv["keep-original-audio"] ?? true;
 const NORMALIZE_AUDIO = argv["normalize-audio"] ?? true;
 const FORCE_LIVE_VOICES = argv["force-live-voices"] ?? false;
@@ -136,6 +165,7 @@ const TRANSLATION_TIMEOUT_SECONDS = Number.parseInt(
 if (QUIET_MODE || JSON_MODE) {
   process.env.VOT_CLI_QUIET = "1";
 }
+if (ARG_LINKS.length > 1) process.env.VOT_PROGRESS_MULTIPLE = "1";
 
 // Validate conflicting flags
 if (QUIET_MODE && JSON_MODE) {
@@ -175,19 +205,16 @@ const processedResults = [];
 
 if (argv["voice-style"] !== undefined) {
   const voiceStyleValue = argv["voice-style"].toLowerCase();
-  if (voiceStyleValue === "tts" || voiceStyleValue === "live") {
+  if (["tts", "live", "edge"].includes(voiceStyleValue)) {
+    VOICE_ENGINE = voiceStyleValue;
     USE_LIVE_VOICES = voiceStyleValue === "live";
     log(
       chalk.cyan(
-        `🎤 Voice style is set to ${USE_LIVE_VOICES ? "live voices (живые голоса) 🔥" : "standard TTS 🤖"}`,
+        `🎤 Voice style is set to ${VOICE_ENGINE === "edge" ? "Microsoft Edge TTS" : USE_LIVE_VOICES ? "live voices (живые голоса) 🔥" : "standard TTS 🤖"}`,
       ),
     );
   } else {
-    logError(
-      chalk.yellow(
-        "⚠️  Invalid voice-style value. Using default (live - live voices)",
-      ),
-    );
+    throw new Error("Invalid voice-style. Choose live, tts or edge.");
   }
 }
 
@@ -198,6 +225,8 @@ if (availableLangs.includes(argv.lang)) {
       `🌐 Request language is set to ${chalk.bold(REQUEST_LANG.toUpperCase())}`,
     ),
   );
+} else if (argv.lang) {
+  throw new Error(`Unsupported source language: ${argv.lang}`);
 }
 
 if (
@@ -210,6 +239,8 @@ if (
       `🗣️  Response language is set to ${chalk.bold(RESPONSE_LANG.toUpperCase())}`,
     ),
   );
+} else if (argv.reslang) {
+  throw new Error(`Unsupported voice language: ${argv.reslang}`);
 }
 
 if (PROXY_STRING) {
@@ -241,7 +272,18 @@ const fetchOpts = {
 };
 const votClient = new VOTClient({
   apiToken: API_TOKEN,
-  fetchFn: undici.fetch,
+  fetchFn: async (url, options) => {
+    const response = await undici.fetch(url, {
+      ...options,
+      signal: options.signal || AbortSignal.timeout(30000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      const requestUrl = new URL(url);
+      throw new Error(`HTTP ${response.status} (${requestUrl.hostname}${requestUrl.pathname})`);
+    }
+    return response;
+  },
   fetchOpts,
 });
 
@@ -252,16 +294,25 @@ const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const getErrorMessage = (error) => {
+  const serviceMessage = error?.data?.message;
+  if (typeof serviceMessage === "string" && serviceMessage.trim()) {
+    return `Яндекс: ${serviceMessage.trim()}`;
+  }
+  if (typeof error?.data?.data === "string") {
+    return `${error.message}: ${error.data.data}`;
+  }
   if (error instanceof Error && error.message) {
     return error.message;
   }
   return String(error || "Unknown translation error");
 };
 
-const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES) => {
+const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES, videoTitle) => {
   const startedAt = Date.now();
   const deadline = startedAt + TRANSLATION_TIMEOUT_SECONDS * 1000;
   let attempt = 0;
+  let transientFailures = 0;
+  let firstRequest = true;
 
   while (Date.now() < deadline) {
     attempt += 1;
@@ -272,12 +323,15 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES) => {
         responseLang: RESPONSE_LANG,
         extraOpts: {
           useLivelyVoice: useLiveVoices,
+          videoTitle,
+          firstRequest,
         },
       });
+      firstRequest = false;
 
-      if (result.translated && result.url) {
+      if (result.translated && result.url && result.status !== 5) {
         task.title = "Video translated successfully.";
-        log(`Audio Link (${videoData.url}): "${chalk.gray(result.url)}"`);
+        log("   └─ Ссылка на полную дорожку перевода получена.");
         return {
           success: true,
           urlOrError: result.url,
@@ -288,8 +342,28 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES) => {
       const suggestedDelay = Number(result.remainingTime) || 30;
       const retryDelaySeconds = Math.min(30, Math.max(5, suggestedDelay));
       task.title = `⏳ Translation in progress... (${elapsedSeconds}s elapsed, attempt ${attempt})`;
+      const remaining = Number(result.remainingTime);
+      log(`Ожидание перевода Яндекса: прошло ${formatDuration(elapsedSeconds)}` +
+        (remaining > 0 ? `; осталось ≈${formatDuration(remaining)}.` : "; сервис ещё готовит дорожку."));
       await sleep(retryDelaySeconds * 1000);
     } catch (error) {
+      const serviceMessage = error?.data?.message || "";
+      const isTemporaryFailure =
+        error?.data?.status === 0 &&
+        /попробуйте позже|try (again )?later|temporar/i.test(serviceMessage);
+      const retryDelaySeconds = 30 * (transientFailures + 1);
+      if (
+        isTemporaryFailure &&
+        transientFailures < 2 &&
+        Date.now() + retryDelaySeconds * 1000 < deadline
+      ) {
+        transientFailures += 1;
+        firstRequest = true;
+        task.title = `⏳ Яндекс временно не смог перевести. Повтор через ${retryDelaySeconds} с (${transientFailures + 1}/3)`;
+        log(chalk.yellow(`   └─ ${getErrorMessage(error)}. Повтор через ${retryDelaySeconds} с.`));
+        await sleep(retryDelaySeconds * 1000);
+        continue;
+      }
       return {
         success: false,
         urlOrError: getErrorMessage(error),
@@ -375,7 +449,7 @@ async function main() {
   tasks = new Listr([], {
     concurrent: true,
     exitOnError: false,
-    renderer: QUIET_MODE || JSON_MODE ? "silent" : "default",
+    renderer: QUIET_MODE || JSON_MODE ? "silent" : "simple",
   });
 
   // Красивый баннер при запуске (только в обычном режиме)
@@ -484,6 +558,7 @@ async function main() {
                   parent.finalURL = finalURL;
                   parent.serviceHost = service.host;
                   parent.videoData = await getVotVideoData(finalURL);
+                  if (VIDEO_DURATION !== undefined) parent.videoData.duration = VIDEO_DURATION;
                   if (!QUIET_MODE && !JSON_MODE) {
                     console.log(chalk.gray(`   └─ URL: ${finalURL}`));
                     console.log(chalk.gray(`   └─ Platform: ${service.host}`));
@@ -492,29 +567,11 @@ async function main() {
                   // Проверяем поддержку live voices для данной платформы
                   parent.useLiveVoices = USE_LIVE_VOICES;
 
-                  if (parent.useLiveVoices && !API_TOKEN) {
-                    if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(
-                        chalk.yellow(
-                          `   └─ ⚠️  Live voices require --api-token; using TTS`,
-                        ),
-                      );
-                    }
-                    parent.useLiveVoices = false;
-                  }
-
                   if (
                     parent.useLiveVoices &&
-                    (REQUEST_LANG !== "en" || RESPONSE_LANG !== "ru")
+                    (!["en", "auto"].includes(REQUEST_LANG) || RESPONSE_LANG !== "ru")
                   ) {
-                    if (!QUIET_MODE && !JSON_MODE) {
-                      console.log(
-                        chalk.yellow(
-                          `   └─ ⚠️  Live voices support only en → ru; using TTS`,
-                        ),
-                      );
-                    }
-                    parent.useLiveVoices = false;
+                    throw new Error("Живые голоса поддерживают английский → русский. Для другой языковой пары выберите стандартную озвучку.");
                   }
 
                   if (
@@ -558,7 +615,7 @@ async function main() {
                         chalk.cyan(`   └─ 📺 Fetching video title...`),
                       );
                     }
-                    parent.videoTitle = await getVideoTitle(finalURL);
+                    parent.videoTitle = VIDEO_TITLE || await getVideoTitle(finalURL);
                     if (parent.videoTitle && !QUIET_MODE && !JSON_MODE) {
                       console.log(
                         chalk.green(`   └─ ✅ Title: "${parent.videoTitle}"`),
@@ -582,26 +639,30 @@ async function main() {
                 exitOnError: false,
                 task: async (ctxSub, subtask) => {
                   let result;
-                  const voiceType = parent.useLiveVoices
+                  const voiceType = VOICE_ENGINE === "edge" ? "Microsoft Edge TTS" : parent.useLiveVoices
                     ? "live voices 🔥"
                     : "TTS 🤖";
                   subtask.title = `🎤 Translating (ID: ${videoId}) with ${voiceType}`;
 
-                  log(
-                    chalk.cyan(
-                      `   └─ 📡 Requesting translation from Yandex API...`,
-                    ),
-                  );
-                  result = await translate(
-                    parent.videoData,
-                    subtask,
-                    parent.useLiveVoices,
-                  );
+                  if (VOICE_ENGINE === "edge") {
+                    try {
+                      const localAudioPath = await createEdgeAudio({
+                        client: votClient, videoData: parent.videoData, videoUrl: parent.finalURL,
+                        metadataPath: VIDEO_METADATA, sourceLanguage: REQUEST_LANG, targetLanguage: RESPONSE_LANG,
+                        outputDir: OUTPUT_DIR, voice: TTS_VOICE, duration: VIDEO_DURATION || parent.videoData.duration, log,
+                      });
+                      result = {success: true, urlOrError: localAudioPath, localAudioPath};
+                    } catch (error) { result = {success: false, urlOrError: getErrorMessage(error)}; }
+                  } else {
+                    log(chalk.cyan(`   └─ 📡 Requesting translation from Yandex API...`));
+                    result = await translate(parent.videoData, subtask, parent.useLiveVoices, parent.videoTitle);
+                  }
 
                   if (
                     !result.success &&
                     parent.shouldFallbackToTTS &&
-                    parent.useLiveVoices
+                    parent.useLiveVoices &&
+                    argv["voice-style"]?.toLowerCase() !== "live"
                   ) {
                     log(
                       chalk.yellow(
@@ -610,7 +671,7 @@ async function main() {
                     );
                     parent.useLiveVoices = false;
                     subtask.title = `🎤 Translating (ID: ${videoId}) with TTS 🤖 (fallback)`;
-                    result = await translate(parent.videoData, subtask, false);
+                    result = await translate(parent.videoData, subtask, false, parent.videoTitle);
                   }
 
                   parent.translateResult = result;
@@ -619,7 +680,7 @@ async function main() {
                     throw new Error(result.urlOrError);
                   }
 
-                  const finalVoiceType = parent.useLiveVoices
+                  const finalVoiceType = VOICE_ENGINE === "edge" ? "Microsoft Edge TTS" : parent.useLiveVoices
                     ? "live voices 🔥"
                     : "TTS 🤖";
                   subtask.title = `✅ Translated successfully with ${finalVoiceType}`;
@@ -654,14 +715,16 @@ async function main() {
                       parent.translateResult?.urlOrError
                     )
                   ) {
-                    throw new Error(
-                      chalk.red(
-                        `Downloading failed! Link "${parent.translateResult?.urlOrError}" not found`,
-                      ),
-                    );
+                    subtask.skip("Скачивание пропущено: перевод не получен");
+                    return;
                   }
 
                   const taskSubTitle = `(ID: ${videoId})`;
+                  if (parent.translateResult.localAudioPath) {
+                    parent.downloadedPath = parent.translateResult.localAudioPath;
+                    subtask.title = "Дорожка Microsoft готова.";
+                    return;
+                  }
                   const filename = OUTPUT_FILE
                     ? OUTPUT_FILE.endsWith(".mp3")
                       ? OUTPUT_FILE
@@ -771,9 +834,8 @@ async function main() {
                       parent.translateResult?.urlOrError
                     )
                   ) {
-                    throw new Error(
-                      chalk.red(`Merging failed! Audio link not found`),
-                    );
+                    subtask.skip("Сборка видео пропущена: перевод не получен");
+                    return;
                   }
 
                   if (!QUIET_MODE && !JSON_MODE) {
@@ -797,7 +859,7 @@ async function main() {
                       ? OUTPUT_FILE
                       : `${OUTPUT_FILE}.mp3`
                     : `${clearFileName(videoId)}---${uuidv4()}.mp3`;
-                  const audioPath = `${OUTPUT_DIR}/${audioFilename}`;
+                  const audioPath = parent.downloadedPath || `${OUTPUT_DIR}/${audioFilename}`;
 
                   const videoFilename = OUTPUT_FILE
                     ? OUTPUT_FILE.endsWith(".mp4")
@@ -816,12 +878,14 @@ async function main() {
                       ),
                     );
                   }
-                  await downloadFile(
-                    parent.translateResult.urlOrError,
-                    audioPath,
-                    null,
-                    null,
-                  );
+                  if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size === 0) {
+                    await downloadFile(
+                      parent.translateResult.urlOrError,
+                      audioPath,
+                      null,
+                      null,
+                    );
+                  }
                   const audioSize = (
                     fs.statSync(audioPath).size /
                     1024 /
@@ -857,11 +921,16 @@ async function main() {
                       audioVolume: ORIGINAL_VOLUME,
                       translationVolume: TRANSLATION_VOLUME,
                       normalizeAudio: NORMALIZE_AUDIO,
+                      maxHeight: MAX_VIDEO_HEIGHT,
+                      videoFormat: VIDEO_FORMAT,
                       ...(proxyData?.proxyUrl
                         ? { proxyUrl: proxyData.proxyUrl }
                         : {}),
                     },
-                  );
+                  ).catch((error) => {
+                    parent.outputError = getErrorMessage(error);
+                    throw error;
+                  });
 
                   // Удаляем временный аудио файл
                   if (!QUIET_MODE && !JSON_MODE) {
@@ -940,7 +1009,7 @@ async function main() {
                           (translationSuccess
                             ? "Output file was not created"
                             : "Unknown error"),
-                      voiceType: parent.useLiveVoices ? "live" : "tts",
+                      voiceType: VOICE_ENGINE === "edge" ? "edge" : parent.useLiveVoices ? "live" : "tts",
                     };
 
                     // Если создано видео с переводом, добавляем путь к нему

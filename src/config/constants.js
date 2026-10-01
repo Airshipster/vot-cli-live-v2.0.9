@@ -1,40 +1,8 @@
-// available languages for translation
-const availableLangs = [
-  "ru",
-  "en",
-  "zh",
-  "ko",
-  "ar",
-  "fr",
-  "it",
-  "es",
-  "de",
-  "ja",
-];
+import fs from "node:fs";
 
-// Additional languages working with TTS
-const additionalTTS = [
-  "ru",
-  "kk",
-  "en",
-  // "bn",
-  // "pt",
-  // "cs",
-  // "hi",
-  // "mr",
-  // "te",
-  // "tr",
-  // "ms",
-  // "vi",
-  // "ta",
-  // "jv",
-  // "ur",
-  // "fa",
-  // "gu",
-  // "id",
-  // "uk",
-  // "kk",
-];
+const languages = JSON.parse(fs.readFileSync(new URL("./languages.json", import.meta.url), "utf8"));
+const availableLangs = languages.source.map((item) => item.code);
+const additionalTTS = languages.target.map((item) => item.code);
 
 // Platforms where live voices are officially supported and tested
 const liveVoicesSupportedPlatforms = ["youtube", "twitch", "vimeo"];
