@@ -1,6 +1,6 @@
 {
   "name": "vot-cli-live",
-  "version": "2.0.5-local",
+  "version": "2.0.6",
   "description": "VOT-CLI with Yandex lively voices, Microsoft Edge TTS, language selection and video merge.",
   "type": "module",
   "main": "./src/index.js",
@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Airshipster/vot-cli-live.git"
+    "url": "git+https://github.com/Airshipster/vot-cli-live-v2.0.6.git"
   },
   "keywords": [
     "cli",
@@ -33,12 +33,12 @@
   "author": "Toil",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Airshipster/vot-cli-live/issues"
+    "url": "https://github.com/Airshipster/vot-cli-live-v2.0.6/issues"
   },
   "engines": {
     "node": ">=22.19.0"
   },
-  "homepage": "https://github.com/Airshipster/vot-cli-live#readme",
+  "homepage": "https://github.com/Airshipster/vot-cli-live-v2.0.6#readme",
   "dependencies": {
     "@toil/translate": "1.10.0",
     "@vot.js/node": "3.1.4",

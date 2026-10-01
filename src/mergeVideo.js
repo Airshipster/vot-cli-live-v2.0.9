@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import axios from "axios";
 import { createProgress } from "./progress.js";
 
 const executable = (variable, name) =>
@@ -82,14 +83,44 @@ export async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl, maxHei
   return downloadedPath;
 }
 
+export async function downloadThumbnail(thumbnailUrl, outputDir) {
+  if (new URL(thumbnailUrl).protocol !== "https:") {
+    throw new Error("Для обложки нужна HTTPS-ссылка на изображение.");
+  }
+  const progress = createProgress("Скачивание обложки");
+  progress.update(0);
+  const thumbnailPath = path.join(outputDir, `thumbnail_${Date.now()}.image`);
+  try {
+    const { data } = await axios.get(thumbnailUrl, {
+      responseType: "arraybuffer", timeout: 30_000, maxContentLength: 20 * 1024 * 1024,
+    });
+    if (!data.length) throw new Error("YouTube вернул пустую обложку.");
+    fs.writeFileSync(thumbnailPath, data);
+    progress.finish();
+    return thumbnailPath;
+  } catch (error) { progress.fail(); throw new Error(`Не удалось скачать обложку: ${error.message}`); }
+}
+
 export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {}) {
-  const { keepOriginalAudio = true, audioVolume = 1, translationVolume = 1, normalizeAudio = true } = options;
+  const { keepOriginalAudio = true, audioVolume = 1, translationVolume = 1, normalizeAudio = true, thumbnailPath } = options;
   const { stdout } = await runTool(executable("VOT_FFPROBE_EXE", "ffprobe"), [
-    "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration", "-of", "json", videoPath,
+    "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration,width,height", "-of", "json", videoPath,
   ], { timeout: 30_000 });
   const metadata = JSON.parse(stdout);
   const duration = Number(metadata.format?.duration);
   const args = ["-hide_banner", "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1", "-i", videoPath, "-i", audioPath];
+  const filters = [];
+  let videoMap = "0:v:0";
+  if (thumbnailPath) {
+    const video = metadata.streams?.find((stream) => stream.codec_type === "video");
+    if (!video?.width || !video?.height) throw new Error("Не удалось определить размер кадра для обложки.");
+    args.push("-i", thumbnailPath);
+    filters.push(`[2:v:0]scale=${video.width}:${video.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+      `pad=${video.width}:${video.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[cover]`,
+      "[0:v:0][cover]overlay=0:0:enable='eq(n,0)':eof_action=repeat[vout]");
+    videoMap = "[vout]";
+  }
+  let audioMap = "1:a:0";
   if (keepOriginalAudio) {
     if (!metadata.streams?.some((stream) => stream.codec_type === "audio")) {
       throw new Error("Не скачана оригинальная аудиодорожка.");
@@ -100,16 +131,22 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
     filter += normalizeAudio
       ? ";[mixed]dynaudnorm=framelen=30:gausssize=31:maxgain=12[aout]"
       : ";[mixed]anull[aout]";
-    args.push("-filter_complex", filter, "-map", "0:v:0", "-map", "[aout]");
+    filters.push(filter);
+    audioMap = "[aout]";
   } else {
-    args.push("-map", "0:v:0", "-map", "1:a:0", "-af", `volume=${translationVolume}`, "-shortest");
+    args.push("-af", `volume=${translationVolume}`, "-shortest");
   }
-  args.push("-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", outputPath);
-  const progress = createProgress("Сведение озвучки");
+  if (filters.length) args.push("-filter_complex", filters.join(";"));
+  args.push("-map", videoMap, "-map", audioMap);
+  if (thumbnailPath) args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough");
+  else args.push("-c:v", "copy");
+  args.push("-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", outputPath);
+  const progress = createProgress(thumbnailPath ? "Обложка и сведение озвучки" : "Сведение озвучки");
   progress.update(0);
   try {
     await runTool(executable("VOT_FFMPEG_EXE", "ffmpeg"), args, {
-      timeout: 900_000,
+      timeout: thumbnailPath && Number.isFinite(duration)
+        ? Math.min(2_147_483_647, Math.ceil(Math.max(900_000, duration * 10_000))) : 900_000,
       onLine(line) {
         if (line.startsWith("out_time_us=") && duration > 0) {
           progress.update(Number(line.slice("out_time_us=".length)) / 1_000_000 / duration * 100);
@@ -121,16 +158,19 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
 }
 
 export async function createVideoWithTranslation(videoUrl, audioPath, outputPath, options = {}) {
-  const { proxyUrl, maxHeight = 0, videoFormat, ...mergeOptions } = options;
+  const { proxyUrl, maxHeight = 0, videoFormat, thumbnailUrl, ...mergeOptions } = options;
   let videoPath;
+  let thumbnailPath;
   try {
+    if (thumbnailUrl) thumbnailPath = await downloadThumbnail(thumbnailUrl, path.dirname(outputPath));
     if (!process.env.VOT_CLI_QUIET) console.log("Скачивание видео и оригинального звука...");
     videoPath = await downloadYouTubeVideo(videoUrl, path.dirname(outputPath), proxyUrl, maxHeight, videoFormat);
     if (!process.env.VOT_CLI_QUIET) console.log("Объединение видео с переводом...");
-    await mergeVideoWithAudio(videoPath, audioPath, outputPath, mergeOptions);
+    await mergeVideoWithAudio(videoPath, audioPath, outputPath, { ...mergeOptions, thumbnailPath });
     if (!process.env.VOT_CLI_QUIET) console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
   } finally {
     if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    if (thumbnailPath && fs.existsSync(thumbnailPath)) fs.unlinkSync(thumbnailPath);
   }
 }
 

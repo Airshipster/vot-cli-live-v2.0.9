@@ -5,6 +5,7 @@
     [ValidateSet('','live','tts','edge')][string]$VoiceStyle = '',
     [string]$TtsVoice = '',
     [string]$VideoFormatId = '',
+    [switch]$ThumbnailFirstFrame,
     [string]$SourceLanguage = 'auto',
     [string]$TargetLanguage = 'ru',
     [switch]$CheckOnly,
@@ -81,6 +82,35 @@ function Read-NumberedChoice {
         }
         Write-Host ('Введите число от 1 до ' + $Count + '.') -ForegroundColor Yellow
     }
+}
+
+function Read-QualityChoice {
+    param([int]$Count, [int]$Default = 1)
+    while ($true) {
+        $answer = Read-Host ('Выберите качество (Enter — ' + $Default + '; 0 — отмена; например, 4 000 — с обложкой первым кадром)')
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return [pscustomobject]@{Number=$Default; Thumbnail=$false}
+        }
+        $number = 0
+        if ($answer -match '^\s*(\d+)(?:\s+(000))?\s*$') {
+            $withThumbnail = $Matches[2] -eq '000'
+            if ([int]::TryParse($Matches[1], [ref]$number) -and $number -ge 0 -and $number -le $Count) {
+                if ($number -eq 0) { throw [OperationCanceledException]::new('Загрузка отменена.') }
+                return [pscustomobject]@{Number=$number; Thumbnail=$withThumbnail}
+            }
+        }
+        Write-Host ('Введите число от 1 до ' + $Count + ', при необходимости добавьте пробел и 000: например, 4 000.') -ForegroundColor Yellow
+    }
+}
+
+function Get-ThumbnailUrl {
+    param($Metadata)
+    $thumbnail = $Metadata.thumbnails | Where-Object { $_.url -match '^https://' } |
+        Sort-Object -Property @{Expression={ [double]$_.width * [double]$_.height };Descending=$true}, @{Expression='preference';Descending=$true} |
+        Select-Object -First 1
+    if ($thumbnail) { return [string]$thumbnail.url }
+    if ($Metadata.thumbnail -match '^https://') { return [string]$Metadata.thumbnail }
+    throw 'YouTube не вернул обложку. Выберите качество без 000 или другой ролик.'
 }
 
 function Get-VideoMetadata {
@@ -174,6 +204,7 @@ function Get-QualityOptions {
         $id = [string]$format.format_id
         $selector = if ($format.acodec -and $format.acodec -ne 'none') { $id } else { $id + '+ba[ext=m4a]/' + $id + '+ba' }
         $bitrate = if ($format.vbr -gt 0) { [double]$format.vbr } elseif ($format.tbr -gt 0) { [double]$format.tbr } else { 0 }
+        $isHls = $format.protocol -match '^m3u8'
         $codec = switch -Regex ($format.vcodec) {
             '^avc|^h264' { 'H.264'; break }
             '^av01' { 'AV1'; break }
@@ -187,6 +218,7 @@ function Get-QualityOptions {
             Id = $id; Selector = $selector; Quality = $quality
             Width = [int]$format.width; Height = [int]$format.height
             Fps = [double]$format.fps; Bitrate = $bitrate; Codec = $codec
+            IsHls = $isHls; FileSize = [double]$format.filesize
             Container = [string]$format.ext
             Range = if ($format.dynamic_range -and $format.dynamic_range -ne 'SDR') { [string]$format.dynamic_range } else { '' }
         }
@@ -197,7 +229,7 @@ function Get-QualityOptions {
 }
 
 function Show-QualityOptions {
-    param([array]$Options)
+    param([array]$Options, $Metadata)
     $showFps = @($Options | Where-Object { $_.Fps -gt 0 } | ForEach-Object { [Math]::Round($_.Fps) } | Sort-Object -Unique).Count -gt 1
     $showBitrate = @($Options | Where-Object { $_.Bitrate -gt 0 } | ForEach-Object { [Math]::Round($_.Bitrate) } | Sort-Object -Unique).Count -gt 1
     $showCodec = @($Options.Codec | Sort-Object -Unique).Count -gt 1
@@ -209,7 +241,8 @@ function Show-QualityOptions {
             Quality = $option.Quality
             Picture = [string]$option.Width + '×' + $option.Height
             Fps = if ($option.Fps -gt 0) { ('{0:0.##}' -f $option.Fps) + ' FPS' } else { '—' }
-            Bitrate = if ($option.Bitrate -gt 0) { ('{0:N0}' -f $option.Bitrate) + ' кбит/с' } else { '—' }
+            Bitrate = if ($option.Bitrate -gt 0) { ('{0:N0}' -f $option.Bitrate) + ' кбит/с' + $(if ($option.IsHls) { ' (HLS*)' }) } else { '—' }
+            Size = if ($option.FileSize -gt 0) { ('{0:N1}' -f ($option.FileSize / 1MB)) + ' МиБ' } else { 'размер неизвестен' }
             Codec = $option.Codec
             Container = $option.Container.ToUpperInvariant()
             Range = $option.Range
@@ -219,6 +252,7 @@ function Show-QualityOptions {
     $fields = @('Number','Quality','Picture')
     if ($showFps) { $fields += 'Fps' }
     if ($showBitrate) { $fields += 'Bitrate' }
+    if (@($Options | Where-Object { $_.FileSize -gt 0 }).Count -gt 0) { $fields += 'Size' }
     if ($showCodec) { $fields += 'Codec' }
     if ($showContainer) { $fields += 'Container' }
     if (@($Options | Where-Object { $_.Range }).Count -gt 0) { $fields += 'Range' }
@@ -233,7 +267,21 @@ function Show-QualityOptions {
         $cells = foreach ($field in $fields) { ([string]$row.$field).PadRight($widths[$field]) }
         Write-Host ($cells -join '  ')
     }
+    if (@($Options | Where-Object { $_.IsHls }).Count -gt 0) {
+        Write-Host '* HLS: заявленная скорость потока, не измеренный средний битрейт. Большая цифра не гарантирует лучшее изображение или больший файл.'
+    }
+    Write-Host 'Размер — только исходный видеопоток, без итоговой озвучки.'
+    if ($Metadata) {
+        $maxH264Height = ($Options.Height | Measure-Object -Maximum).Maximum
+        $higherQualities = @($Metadata.formats | Where-Object {
+            $_.height -gt $maxH264Height -and $_.vcodec -ne 'none' -and -not $_.has_drm -and $_.format_note -match '\d{3,4}p'
+        } | ForEach-Object { if ($_.format_note -match '(\d{3,4}p)') { $Matches[1] } } | Sort-Object -Unique)
+        if ($higherQualities.Count -gt 0) {
+            Write-Host ('Выше доступны ' + ($higherQualities -join ', ') + ', но в других кодеках. Они скрыты фильтром MP4 / H.264.') -ForegroundColor Yellow
+        }
+    }
     Write-Host 'В каждом варианте: оригинальный звук 15%, перевод 100%.'
+    Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Это требует перекодирования видео.'
 }
 
 function Get-DesktopResultPath {
@@ -273,7 +321,8 @@ foreach ($requiredPath in @($nodeExe,$entryPoint,(Join-Path $binRoot 'yt-dlp.exe
 }
 
 Write-Host ''
-Write-Host 'VOT-CLI Live — озвучка видео (локальная версия 2.0.5)' -ForegroundColor Cyan
+$appVersion = (Get-Content -LiteralPath (Join-Path $appRoot 'package.json') -Raw | ConvertFrom-Json).version
+Write-Host ('VOT-CLI Live — озвучка видео (версия ' + $appVersion + ')') -ForegroundColor Cyan
 Write-Host 'Выберите языки, озвучку и качество видео.'
 Write-Host 'Видеоформат: MP4 / H.264.'
 Write-Host ('Папка для видео: ' + $videoRoot)
@@ -351,7 +400,8 @@ do {
         if ($selectedVoice -eq 'edge') { $selectedTtsVoice = Read-MicrosoftVoice $selectedTarget $TtsVoice }
         Write-Host ('Видео: ' + $metadata.title)
         $qualityOptions = @(Get-QualityOptions $metadata)
-        Show-QualityOptions $qualityOptions
+        Show-QualityOptions $qualityOptions $metadata
+        $addThumbnail = [bool]$ThumbnailFirstFrame
         if ($VideoFormatId) {
             $selectedQuality = $qualityOptions | Where-Object { $_.Id -eq $VideoFormatId } | Select-Object -First 1
             if (-not $selectedQuality) { throw ('У ролика нет формата ' + $VideoFormatId + '.') }
@@ -360,9 +410,11 @@ do {
             if (-not $selectedQuality) { throw 'Нет формата в пределах указанной высоты.' }
         } else {
             Set-VotState 'awaiting_quality'
-            $qualityChoice = Read-NumberedChoice 'Выберите качество' $qualityOptions.Count 1
-            $selectedQuality = $qualityOptions[$qualityChoice - 1]
+            $qualityChoice = Read-QualityChoice $qualityOptions.Count 1
+            $selectedQuality = $qualityOptions[$qualityChoice.Number - 1]
+            $addThumbnail = $addThumbnail -or $qualityChoice.Thumbnail
         }
+        $thumbnailUrl = if ($addThumbnail) { Get-ThumbnailUrl $metadata } else { '' }
         $jobName = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6)
         $jobRoot = Join-Path $jobsRoot $jobName
         New-Item -ItemType Directory -Path $jobRoot -Force | Out-Null
@@ -370,6 +422,10 @@ do {
         Write-Host ('Выбрано: ' + $selectedQuality.Quality + ', ' + $selectedQuality.Width + '×' + $selectedQuality.Height + ', ' + $selectedQuality.Codec)
         Write-Host 'Получение перевода и скачивание видео…' -ForegroundColor Cyan
         $votArguments = @($entryPoint, ('--voice-style=' + $selectedVoice), ('--lang=' + $sourceLanguage), ('--reslang=' + $selectedTarget), '--merge-video', ('--video-format=' + $selectedQuality.Selector), ('--video-title=' + $metadata.title), ('--video-duration=' + $metadata.duration), '--keep-original-audio=true', '--normalize-audio=false', '--original-volume=0.15', '--translation-volume=1', '--translation-timeout=900', ('--output=' + $jobRoot), '--output-file=video-ru')
+        if ($addThumbnail) {
+            Write-Host 'Первый кадр: обложка YouTube. Видео будет перекодировано в H.264 с сохранением разрешения и частоты кадров.' -ForegroundColor Cyan
+            $votArguments += '--thumbnail-url=' + $thumbnailUrl
+        }
         if ($selectedVoice -eq 'edge') {
             $metadataPath = Join-Path $jobRoot 'metadata.json'
             $metadata | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $metadataPath -Encoding UTF8

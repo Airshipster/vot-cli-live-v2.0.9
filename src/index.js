@@ -58,6 +58,7 @@ Args:
   --video-title — Original title, as supplied by the video player
   --video-duration — Original duration in seconds, as supplied by the video player
   --video-metadata — yt-dlp metadata JSON file (used for Microsoft subtitles)
+  --thumbnail-url — HTTPS image URL to replace the first video frame with the thumbnail (re-encodes video as H.264)
   --tts-voice — Microsoft voice ID, e.g. ru-RU-SvetlanaNeural (with --voice-style=edge)
   --keep-original-audio — Keep original audio when merging (mix with translation. Default: true)
   --normalize-audio — Normalize audio levels for consistent volume (uses dynaudnorm. Default: true)
@@ -116,6 +117,7 @@ const argv = parseArgs(process.argv.slice(2), {
     "video-title",
     "video-duration",
     "video-metadata",
+    "thumbnail-url",
     "tts-voice",
   ],
 });
@@ -135,6 +137,7 @@ const MAX_VIDEO_HEIGHT = Number(argv["max-height"] ?? 0);
 const VIDEO_FORMAT = argv["video-format"] || undefined;
 const VIDEO_TITLE = argv["video-title"] || undefined;
 const VIDEO_METADATA = argv["video-metadata"] || undefined;
+const THUMBNAIL_URL = argv["thumbnail-url"] || undefined;
 const TTS_VOICE = argv["tts-voice"] || undefined;
 const VIDEO_DURATION = argv["video-duration"] === undefined ? undefined : Number(argv["video-duration"]);
 if (VIDEO_DURATION !== undefined && (!Number.isFinite(VIDEO_DURATION) || VIDEO_DURATION <= 0)) {
@@ -923,6 +926,7 @@ async function main() {
                       normalizeAudio: NORMALIZE_AUDIO,
                       maxHeight: MAX_VIDEO_HEIGHT,
                       videoFormat: VIDEO_FORMAT,
+                      thumbnailUrl: THUMBNAIL_URL,
                       ...(proxyData?.proxyUrl
                         ? { proxyUrl: proxyData.proxyUrl }
                         : {}),
