@@ -197,10 +197,19 @@ function Get-QualityOptions {
             $qualityNames[([string]$format.width + 'x' + $format.height)] = $Matches[1] + 'p'
         }
     }
-    $options = foreach ($format in $Metadata.formats) {
-        if (-not $format.vcodec -or $format.vcodec -eq 'none' -or $format.height -le 0 -or
-            $format.has_drm -or $format.protocol -eq 'mhtml') { continue }
-        if ($format.ext -ne 'mp4' -or $format.vcodec -notmatch '^(avc[13]|h264)(\.|$)') { continue }
+    $videoFormats = @($Metadata.formats | Where-Object {
+        $_.vcodec -and $_.vcodec -ne 'none' -and $_.width -gt 0 -and $_.height -gt 0 -and
+        -not $_.has_drm -and $_.protocol -ne 'mhtml'
+    })
+    $h264Pictures = @{}
+    foreach ($format in $videoFormats) {
+        if ($format.vcodec -match '^(avc[13]|h264)(\.|$)') {
+            $h264Pictures[([string]$format.width + 'x' + $format.height)] = $true
+        }
+    }
+    $options = foreach ($format in $videoFormats) {
+        $pictureKey = [string]$format.width + 'x' + $format.height
+        if ($h264Pictures.ContainsKey($pictureKey) -and $format.vcodec -notmatch '^(avc[13]|h264)(\.|$)') { continue }
         $id = [string]$format.format_id
         $selector = if ($format.acodec -and $format.acodec -ne 'none') { $id } else { $id + '+ba[ext=m4a]/' + $id + '+ba' }
         $bitrate = if ($format.vbr -gt 0) { [double]$format.vbr } elseif ($format.tbr -gt 0) { [double]$format.tbr } else { 0 }
@@ -212,7 +221,6 @@ function Get-QualityOptions {
             '^hev|^hvc' { 'HEVC'; break }
             default { [string]$format.vcodec }
         }
-        $pictureKey = [string]$format.width + 'x' + $format.height
         $quality = if ($qualityNames.ContainsKey($pictureKey)) { $qualityNames[$pictureKey] } else { [string]$format.height + 'p' }
         [pscustomobject]@{
             Id = $id; Selector = $selector; Quality = $quality
@@ -224,12 +232,12 @@ function Get-QualityOptions {
         }
     }
     $options = @($options | Sort-Object -Property @{Expression='Height';Descending=$true}, @{Expression='Width';Descending=$true}, @{Expression='Fps';Descending=$true}, @{Expression='Bitrate';Descending=$true}, Id)
-    if ($options.Count -eq 0) { throw 'У ролика нет доступных MP4 с кодеком H.264.' }
+    if ($options.Count -eq 0) { throw 'У ролика нет доступных видеоформатов.' }
     return $options
 }
 
 function Show-QualityOptions {
-    param([array]$Options, $Metadata)
+    param([array]$Options)
     $showFps = @($Options | Where-Object { $_.Fps -gt 0 } | ForEach-Object { [Math]::Round($_.Fps) } | Sort-Object -Unique).Count -gt 1
     $showBitrate = @($Options | Where-Object { $_.Bitrate -gt 0 } | ForEach-Object { [Math]::Round($_.Bitrate) } | Sort-Object -Unique).Count -gt 1
     $showCodec = @($Options.Codec | Sort-Object -Unique).Count -gt 1
@@ -262,7 +270,7 @@ function Show-QualityOptions {
         $widths[$field] = ($rows | ForEach-Object { ([string]$_.$field).Length } | Measure-Object -Maximum).Maximum
     }
     Write-Host ''
-    Write-Host 'Доступное качество MP4 / H.264 (от большего к меньшему):' -ForegroundColor Cyan
+    Write-Host 'Доступное качество (от большего к меньшему):' -ForegroundColor Cyan
     foreach ($row in $rows) {
         $cells = foreach ($field in $fields) { ([string]$row.$field).PadRight($widths[$field]) }
         Write-Host ($cells -join '  ')
@@ -271,15 +279,8 @@ function Show-QualityOptions {
         Write-Host '* HLS: заявленная скорость потока, не измеренный средний битрейт. Большая цифра не гарантирует лучшее изображение или больший файл.'
     }
     Write-Host 'Размер — только исходный видеопоток, без итоговой озвучки.'
-    if ($Metadata) {
-        $maxH264Height = ($Options.Height | Measure-Object -Maximum).Maximum
-        $higherQualities = @($Metadata.formats | Where-Object {
-            $_.height -gt $maxH264Height -and $_.vcodec -ne 'none' -and -not $_.has_drm -and $_.format_note -match '\d{3,4}p'
-        } | ForEach-Object { if ($_.format_note -match '(\d{3,4}p)') { $Matches[1] } } | Sort-Object -Unique)
-        if ($higherQualities.Count -gt 0) {
-            Write-Host ('Выше доступны ' + ($higherQualities -join ', ') + ', но в других кодеках. Они скрыты фильтром MP4 / H.264.') -ForegroundColor Yellow
-        }
-    }
+    Write-Host 'Для каждого разрешения: только H.264, если он доступен; иначе все доступные кодеки.'
+    Write-Host 'Контейнер в списке — исходный; готовое видео сохраняется в MP4.'
     Write-Host 'В каждом варианте: оригинальный звук 15%, перевод 100%.'
     Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Это требует перекодирования видео.'
 }
@@ -324,7 +325,7 @@ Write-Host ''
 $appVersion = (Get-Content -LiteralPath (Join-Path $appRoot 'package.json') -Raw | ConvertFrom-Json).version
 Write-Host ('VOT-CLI Live — озвучка видео (версия ' + $appVersion + ')') -ForegroundColor Cyan
 Write-Host 'Выберите языки, озвучку и качество видео.'
-Write-Host 'Видеоформат: MP4 / H.264.'
+Write-Host 'Результат: MP4. Для каждого разрешения приоритет H.264.'
 Write-Host ('Папка для видео: ' + $videoRoot)
 Write-Host ''
 
@@ -400,7 +401,7 @@ do {
         if ($selectedVoice -eq 'edge') { $selectedTtsVoice = Read-MicrosoftVoice $selectedTarget $TtsVoice }
         Write-Host ('Видео: ' + $metadata.title)
         $qualityOptions = @(Get-QualityOptions $metadata)
-        Show-QualityOptions $qualityOptions $metadata
+        Show-QualityOptions $qualityOptions
         $addThumbnail = [bool]$ThumbnailFirstFrame
         if ($VideoFormatId) {
             $selectedQuality = $qualityOptions | Where-Object { $_.Id -eq $VideoFormatId } | Select-Object -First 1
