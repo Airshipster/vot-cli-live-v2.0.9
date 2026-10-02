@@ -101,6 +101,24 @@ export async function downloadThumbnail(thumbnailUrl, outputDir) {
   } catch (error) { progress.fail(); throw new Error(`Не удалось скачать обложку: ${error.message}`); }
 }
 
+export async function measureVideoBitrate(videoPath, duration) {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error("Не удалось определить длительность видеодорожки для сохранения размера.");
+  }
+  let bytes = 0;
+  await runTool(executable("VOT_FFPROBE_EXE", "ffprobe"), [
+    "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=size", "-of", "csv=p=0", videoPath,
+  ], {
+    maxBuffer: 64 * 1024 * 1024,
+    onLine(line) {
+      const match = /^(\d+)(?:,|$)/.exec(line.trim());
+      if (match) bytes += Number(match[1]);
+    },
+  });
+  if (bytes <= 0) throw new Error("Не удалось измерить объём исходного видеопотока для обложки.");
+  return Math.max(1, Math.round(bytes * 8 / duration));
+}
+
 export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {}) {
   const { keepOriginalAudio = true, audioVolume = 1, translationVolume = 1, normalizeAudio = true, thumbnailPath } = options;
   const { stdout } = await runTool(executable("VOT_FFPROBE_EXE", "ffprobe"), [
@@ -108,12 +126,21 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
   ], { timeout: 30_000 });
   const metadata = JSON.parse(stdout);
   const duration = Number(metadata.format?.duration);
+  const video = metadata.streams?.find((stream) => stream.codec_type === "video");
+  const videoDuration = Number(video?.duration) || duration;
+  let thumbnailBitrate;
   const args = ["-hide_banner", "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1", "-i", videoPath, "-i", audioPath];
   const filters = [];
   let videoMap = "0:v:0";
   if (thumbnailPath) {
-    const video = metadata.streams?.find((stream) => stream.codec_type === "video");
     if (!video?.width || !video?.height) throw new Error("Не удалось определить размер кадра для обложки.");
+    const analysis = createProgress("Измерение исходного битрейта");
+    analysis.update(NaN);
+    try {
+      thumbnailBitrate = await measureVideoBitrate(videoPath, videoDuration);
+      analysis.finish();
+    } catch (error) { analysis.fail(); throw error; }
+    if (!process.env.VOT_CLI_QUIET) console.log(`Обложка: целевой видеобитрейт ${Math.round(thumbnailBitrate / 1000)} кбит/с, как у исходного видеопотока.`);
     args.push("-i", thumbnailPath);
     filters.push(`[2:v:0]scale=${video.width}:${video.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
       `pad=${video.width}:${video.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[cover]`,
@@ -138,7 +165,9 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
   }
   if (filters.length) args.push("-filter_complex", filters.join(";"));
   args.push("-map", videoMap, "-map", audioMap);
-  if (thumbnailPath) args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough");
+  if (thumbnailPath) args.push("-c:v", "libx264", "-preset", "fast", "-b:v", String(thumbnailBitrate),
+    "-maxrate", String(thumbnailBitrate * 2), "-bufsize", String(thumbnailBitrate * 4),
+    "-pix_fmt", "yuv420p", "-fps_mode", "passthrough");
   else args.push("-c:v", "copy");
   args.push("-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", outputPath);
   const progress = createProgress(thumbnailPath ? "Обложка и сведение озвучки" : "Сведение озвучки");
