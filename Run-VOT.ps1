@@ -207,9 +207,18 @@ function Get-QualityOptions {
             $h264Pictures[([string]$format.width + 'x' + $format.height)] = $true
         }
     }
-    $options = foreach ($format in $videoFormats) {
+    $codecFormats = @(foreach ($format in $videoFormats) {
         $pictureKey = [string]$format.width + 'x' + $format.height
         if ($h264Pictures.ContainsKey($pictureKey) -and $format.vcodec -notmatch '^(avc[13]|h264)(\.|$)') { continue }
+        $format
+    })
+    $mp4Pictures = @{}
+    foreach ($format in $codecFormats) {
+        if ($format.ext -eq 'mp4') { $mp4Pictures[([string]$format.width + 'x' + $format.height)] = $true }
+    }
+    $options = foreach ($format in $codecFormats) {
+        $pictureKey = [string]$format.width + 'x' + $format.height
+        if ($mp4Pictures.ContainsKey($pictureKey) -and $format.ext -ne 'mp4') { continue }
         $id = [string]$format.format_id
         $selector = if ($format.acodec -and $format.acodec -ne 'none') { $id } else { $id + '+ba[ext=m4a]/' + $id + '+ba' }
         $bitrate = if ($format.vbr -gt 0) { [double]$format.vbr } elseif ($format.tbr -gt 0) { [double]$format.tbr } else { 0 }
@@ -280,9 +289,10 @@ function Show-QualityOptions {
     }
     Write-Host 'Размер — только исходный видеопоток, без итоговой озвучки.'
     Write-Host 'Для каждого разрешения: только H.264, если он доступен; иначе все доступные кодеки.'
+    Write-Host 'После выбора кодеков: только MP4, если он доступен для этого разрешения; иначе остальные контейнеры.'
     Write-Host 'Контейнер в списке — исходный; готовое видео сохраняется в MP4.'
     Write-Host 'В каждом варианте: оригинальный звук 15%, перевод 100%.'
-    Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Это требует перекодирования видео.'
+    Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Перекодирование всего видео может существенно увеличить файл.'
 }
 
 function Get-DesktopResultPath {
