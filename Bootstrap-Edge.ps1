@@ -6,7 +6,6 @@ $edgeVersion = '7.2.8'
 $candidates = @((Join-Path $runtimeRoot 'python.exe'))
 $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
 if ($pythonCommand -and $pythonCommand.Source -notmatch 'WindowsApps') { $candidates += $pythonCommand.Source }
-$candidates += Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
 $pythonExe = $null
 foreach ($candidate in $candidates) {
     if (-not (Test-Path -LiteralPath $candidate)) { continue }

@@ -3,17 +3,23 @@ import { Writable } from "stream";
 import axios from "axios";
 import { jsonToSrt } from "./utils/utils.js";
 import { createProgress } from "./progress.js";
+import {diagnostic,errorDetails,safeEndpoint} from './diagnostics.js';
 
 export default async function downloadFile(url, outputPath, subtask, videoId) {
   if (!url) {
     throw new Error("Invalid download link");
   }
   const IS_NEED_CONVERT = outputPath.endsWith(".srt");
-  const { data, headers } = await axios({
+  const started = Date.now();
+  diagnostic('translation-audio.download.start', {endpoint:safeEndpoint(url),subtitles:IS_NEED_CONVERT});
+  let response;
+  try { response = await axios({
     method: "get",
     url: url,
     responseType: "stream",
-  });
+  }); } catch(error) { diagnostic('translation-audio.download.error', {error:errorDetails(error),durationMs:Date.now()-started}); throw error; }
+  const {data,headers} = response;
+  diagnostic('translation-audio.download.response', {httpStatus:response.status,bytes:Number(headers['content-length']) || undefined});
 
   const writer = fs.createWriteStream(outputPath);
   const progress = createProgress(IS_NEED_CONVERT ? "Скачивание субтитров" : "Скачивание перевода");
@@ -46,8 +52,8 @@ export default async function downloadFile(url, outputPath, subtask, videoId) {
 
   return new Promise((resolve, reject) => {
     data.on("error", (error) => writer.destroy(error));
-    writer.on("finish", () => { progress.finish(); resolve(); });
-    writer.on("error", (error) => { data.destroy(); progress.fail(); reject(error); });
+    writer.on("finish", () => { diagnostic('translation-audio.download.finish', {bytes:downloadedLength,durationMs:Date.now()-started}); progress.finish(); resolve(); });
+    writer.on("error", (error) => { diagnostic('translation-audio.download.error', {bytes:downloadedLength,durationMs:Date.now()-started,error:errorDetails(error)}); data.destroy(); progress.fail(); reject(error); });
   });
 }
 

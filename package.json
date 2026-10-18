@@ -1,7 +1,7 @@
 {
   "name": "vot-cli-live",
-  "version": "2.0.9",
-  "description": "VOT-CLI with Yandex lively voices, Microsoft Edge TTS, language selection and video merge.",
+  "version": "2.1.0",
+  "description": "Windows video translation with Yandex live voices, Microsoft Edge TTS, local files and resumable YouTube queues.",
   "type": "module",
   "main": "./src/index.js",
   "bin": "./src/index.js",
@@ -10,7 +10,13 @@
     "README.md",
     "README-EN.md",
     "TROUBLESHOOTING.md",
-    "changelog.md"
+    "changelog.md",
+    "*.ps1",
+    "Start-VOT.cmd",
+    "README-UPSTREAM.md",
+    "LOCAL-CHANGES.md",
+    "DIAGNOSTICS.md",
+    "PRIVACY.md"
   ],
   "scripts": {
     "start": "node src/index.js",

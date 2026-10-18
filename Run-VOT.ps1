@@ -1,7 +1,15 @@
 ﻿param(
     [string]$VideoUrl,
+    [string]$LocalVideo,
     [switch]$Once,
     [ValidateRange(0,8640)][int]$MaxHeight = 0,
+    [ValidateRange(0,1000)][double]$MaxFps = 0,
+    [switch]$AutoQuality,
+    [switch]$ShowAllFormats,
+    [int]$ExpectedHeight = 0,
+    [double]$ExpectedFps = 0,
+    [string]$ResultFile,
+    [string]$AttemptId,
     [ValidateSet('','live','tts','edge')][string]$VoiceStyle = '',
     [string]$TtsVoice = '',
     [string]$VideoFormatId = '',
@@ -37,6 +45,8 @@ $env:VOT_NODE_EXE = $nodeExe
 $env:VOT_YTDLP_EXE = Join-Path $binRoot 'yt-dlp.exe'
 $env:VOT_FFMPEG_EXE = Join-Path $binRoot 'ffmpeg.exe'
 $env:VOT_FFPROBE_EXE = Join-Path $binRoot 'ffprobe.exe'
+. (Join-Path $PSScriptRoot 'Yandex-Account.ps1')
+. (Join-Path $PSScriptRoot 'Vot-Queue.ps1')
 [Environment]::SetEnvironmentVariable('VOT_CLI_QUIET', $null, 'Process')
 $jobsRoot = Join-Path $workRoot 'video-jobs'
 New-Item -ItemType Directory -Path $jobsRoot -Force | Out-Null
@@ -71,13 +81,18 @@ function Get-CanonicalVideoUrl {
 }
 
 function Read-NumberedChoice {
-    param([string]$Prompt, [int]$Count, [int]$Default = 1)
+    param([string]$Prompt, [int]$Count, [int]$Default = 1, [switch]$NoCancel)
     while ($true) {
-        $answer = Read-Host ($Prompt + ' (Enter — ' + $Default + '; 0 — отмена)')
+        $choices = if ($Count -eq 2) { '1 или 2' } else { '1–' + $Count }
+        $hint = if ($NoCancel) { $choices + '; Enter — ' + $Default } else { $choices + '; Enter — ' + $Default + '; 0 — отмена' }
+        $answer = Read-Host ($Prompt + ' (' + $hint + ')')
         if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
         $number = 0
         if ([int]::TryParse($answer, [ref]$number) -and $number -ge 0 -and $number -le $Count) {
-            if ($number -eq 0) { throw [OperationCanceledException]::new('Загрузка отменена.') }
+            if ($number -eq 0) {
+                if ($NoCancel) { Write-Host ('Введите ' + $choices + '.') -ForegroundColor Yellow; continue }
+                throw [OperationCanceledException]::new('Загрузка отменена.')
+            }
             return $number
         }
         Write-Host ('Введите число от 1 до ' + $Count + '.') -ForegroundColor Yellow
@@ -85,21 +100,61 @@ function Read-NumberedChoice {
 }
 
 function Read-QualityChoice {
-    param([int]$Count, [int]$Default = 1)
+    param([int]$Count, [int]$Default = 1, [bool]$AllowThumbnail = $true)
     while ($true) {
-        $answer = Read-Host ('Выберите качество (Enter — ' + $Default + '; 0 — отмена; например, 4 000 — с обложкой первым кадром)')
+        $hint = if ($AllowThumbnail) { '; например, 4 000 — с обложкой первым кадром' } else { '; исходное разрешение и FPS' }
+        $answer = Read-Host ('Выберите качество (Enter — ' + $Default + '; 0 — отмена' + $hint + ')')
         if ([string]::IsNullOrWhiteSpace($answer)) {
             return [pscustomobject]@{Number=$Default; Thumbnail=$false}
         }
         $number = 0
         if ($answer -match '^\s*(\d+)(?:\s+(000))?\s*$') {
             $withThumbnail = $Matches[2] -eq '000'
+            if ($withThumbnail -and -not $AllowThumbnail) { Write-Host 'У локального файла нет обложки YouTube. Введите только номер.' -ForegroundColor Yellow; continue }
             if ([int]::TryParse($Matches[1], [ref]$number) -and $number -ge 0 -and $number -le $Count) {
                 if ($number -eq 0) { throw [OperationCanceledException]::new('Загрузка отменена.') }
                 return [pscustomobject]@{Number=$number; Thumbnail=$withThumbnail}
             }
         }
         Write-Host ('Введите число от 1 до ' + $Count + ', при необходимости добавьте пробел и 000: например, 4 000.') -ForegroundColor Yellow
+    }
+}
+
+function Select-LocalVideoFile {
+    Set-VotState 'awaiting_local_file'
+    $pickerHost = Join-Path $PSHOME 'pwsh.exe'
+    $selected = & $pickerHost -NoLogo -NoProfile -STA -File (Join-Path $PSScriptRoot 'Select-VideoFile.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось открыть окно выбора файла.' }
+    if (-not $selected) { throw [OperationCanceledException]::new('Выбор файла отменён.') }
+    return [string]($selected | Select-Object -Last 1)
+}
+
+function Read-LocalLiveToken {
+    Set-VotState 'awaiting_yandex_login'
+    Write-Host 'Для «Живых голосов» локального файла нужно один раз войти в Яндекс.' -ForegroundColor Yellow
+    return Connect-VotYandex $nodeExe
+}
+
+function Get-LocalVideoMetadata {
+    param([string]$FilePath)
+    $file = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+    if ($file.PSIsContainer -or $file.Length -eq 0) { throw 'Выберите непустой видеофайл.' }
+    $lines = & $env:VOT_FFPROBE_EXE -v error -show_entries 'format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,bit_rate:stream_tags=language' -of json $file.FullName
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось прочитать видеофайл. Сообщение FFprobe находится выше.' }
+    $probe = ($lines -join [Environment]::NewLine) | ConvertFrom-Json
+    $video = $probe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
+    $audio = $probe.streams | Where-Object { $_.codec_type -eq 'audio' } | Select-Object -First 1
+    if (-not $video -or -not $audio -or [double]$probe.format.duration -le 0) { throw 'Файл должен содержать видео и оригинальную звуковую дорожку.' }
+    $fpsParts = ([string]$video.avg_frame_rate).Split('/')
+    $fps = if ($fpsParts.Count -eq 2 -and [double]$fpsParts[1] -gt 0) { [double]$fpsParts[0] / [double]$fpsParts[1] } else { 0 }
+    return [pscustomobject]@{
+        title=$file.BaseName; duration=[double]$probe.format.duration; language=''; LocalPath=$file.FullName
+        formats=@([pscustomobject]@{
+            format_id='local'; width=[int]$video.width; height=[int]$video.height; fps=$fps
+            vcodec=[string]$video.codec_name; acodec=[string]$audio.codec_name
+            vbr=[double]$video.bit_rate / 1000; tbr=0; filesize=$file.Length
+            ext=$file.Extension.TrimStart('.'); protocol='file'; format_note=''; has_drm=$false; dynamic_range='SDR'
+        })
     }
 }
 
@@ -116,10 +171,17 @@ function Get-ThumbnailUrl {
 function Get-VideoMetadata {
     param([string]$Url)
     Write-Host 'Получение названия и полного списка качества с YouTube…' -ForegroundColor Cyan
-    $metadataLines = & $env:VOT_YTDLP_EXE --ignore-config --no-playlist --no-progress --js-runtimes ('node:' + $nodeExe) --socket-timeout 30 --retries 2 --dump-single-json --skip-download $Url
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось получить список качества. Сообщение yt-dlp находится выше.' }
+    Write-VotDiagnostic 'metadata.start' @{provider='youtube'}
+    $metadataOutput = @(& $env:VOT_YTDLP_EXE --ignore-config --no-playlist --no-progress --js-runtimes ('node:' + $nodeExe) --socket-timeout 30 --retries 3 --extractor-retries 3 --dump-single-json --skip-download $Url 2>&1)
+    $metadataExit = $LASTEXITCODE
+    $metadataLines = foreach ($line in $metadataOutput) {
+        if (([string]$line).TrimStart().StartsWith('{')) { [string]$line }
+        else { Write-VotDiagnostic 'metadata.message' @{provider='youtube';message=[string]$line}; Write-Host ([string]$line) -ForegroundColor Yellow }
+    }
+    if ($metadataExit -ne 0) { Write-VotDiagnostic 'metadata.error' @{provider='youtube';exitCode=$metadataExit}; throw 'Не удалось получить список качества. Сообщение yt-dlp находится выше.' }
     $metadata = ($metadataLines -join [Environment]::NewLine) | ConvertFrom-Json
     if (-not $metadata.title -or -not $metadata.formats) { throw 'YouTube не вернул название или форматы видео.' }
+    Write-VotDiagnostic 'metadata.finish' @{provider='youtube';videoId=$metadata.id;durationSeconds=$metadata.duration;formats=$metadata.formats.Count}
     return $metadata
 }
 
@@ -133,6 +195,90 @@ function Read-LanguageChoice {
     }
     $number = Read-NumberedChoice $Prompt $Languages.Count $defaultNumber
     return [string]$Languages[$number - 1].code
+}
+
+function Read-VotLanguageSettings {
+    Write-Host ''
+    Write-Host '1 — На русский — определить язык видео автоматически'
+    Write-Host '2 — Выбрать другие языки'
+    $choice = Read-NumberedChoice 'Язык озвучки' 2 1
+    if ($choice -eq 1) { return [pscustomobject]@{Source='auto'; Target='ru'} }
+    $source = Read-LanguageChoice 'С какого языка переводить' $languageConfig.source 'auto'
+    $target = Read-LanguageChoice 'На какой язык озвучить' $languageConfig.target 'ru'
+    return [pscustomobject]@{Source=$source; Target=$target}
+}
+
+function Show-VotAccountMenu {
+    while ($true) {
+        Write-Host ''; Write-Host 'Аккаунт Яндекса' -ForegroundColor Cyan
+        try { $hasAccount = -not [string]::IsNullOrWhiteSpace((Get-VotYandexToken)) }
+        catch {
+            Write-Host $_.Exception.Message -ForegroundColor Yellow
+            Write-Host '0 — Назад'
+            if ((Read-Host 'Выберите пункт') -eq '0') { return }
+            continue
+        }
+        if ($hasAccount) {
+            Write-Host 'Вход сохранён.'
+            Write-Host '1 — Удалить сохранённый вход'
+        } else { Write-Host '1 — Войти в Яндекс' }
+        Write-Host '0 — Назад'
+        $choice = Read-Host 'Выберите пункт'
+        if ($choice -eq '0') { return }
+        if ($choice -ne '1') { continue }
+        try {
+            if ($hasAccount) { Disconnect-VotYandex }
+            else { Connect-VotYandex $nodeExe | Out-Null }
+        } catch { Write-Host $_.Exception.Message -ForegroundColor Yellow }
+    }
+}
+
+function Read-VotMainAction {
+    :MainMenu while ($true) {
+        Write-Host '1 — Озвучить видео с YouTube'
+        Write-Host '2 — Озвучить локальное видео'
+        Write-Host '3 — Справка оригинальной утилиты'
+        Write-Host '0 — Выход'
+        $choice = Read-Host 'Выберите пункт'
+        switch ($choice) {
+            '0' { return 'exit' }
+            '2' {
+                :LocalMenu while ($true) {
+                    Write-Host ''; Write-Host 'Локальное видео' -ForegroundColor Cyan
+                    Write-Host '1 — Выбрать видеофайл'
+                    Write-Host '2 — Аккаунт Яндекса'
+                    Write-Host '0 — Назад'
+                    switch (Read-Host 'Выберите пункт') {
+                        '1' { return 'local' }
+                        '2' { Show-VotAccountMenu; continue LocalMenu }
+                        '0' { break LocalMenu }
+                        default { continue LocalMenu }
+                    }
+                }
+                Write-Host ''
+            }
+            '3' { & $nodeExe $entryPoint --help | Out-Host; Write-Host ''; continue MainMenu }
+            '1' {
+                :YouTubeMenu while ($true) {
+                    Write-Host ''; Write-Host 'YouTube' -ForegroundColor Cyan
+                    Write-Host '1 — Одно видео'
+                    Write-Host '2 — Канал целиком'
+                    Write-Host '3 — Список ссылок'
+                    Write-Host '4 — Продолжить очередь'
+                    Write-Host '0 — Назад'
+                    switch (Read-Host 'Выберите пункт') {
+                        '1' { return 'youtube' }
+                        '2' { return 'channel' }
+                        '3' { return 'batch' }
+                        '4' { return 'resume' }
+                        '0' { break YouTubeMenu }
+                        default { continue YouTubeMenu }
+                    }
+                }
+                Write-Host ''
+            }
+        }
+    }
 }
 
 function Get-DetectedSourceLanguage {
@@ -188,7 +334,7 @@ function Read-MicrosoftVoice {
 }
 
 function Get-QualityOptions {
-    param($Metadata)
+    param($Metadata, [switch]$AllVariants)
     $hasAudio = @($Metadata.formats | Where-Object { $_.acodec -and $_.acodec -ne 'none' }).Count -gt 0
     if (-not $hasAudio) { throw 'У ролика нет доступной оригинальной аудиодорожки для смешивания.' }
     $qualityNames = @{}
@@ -209,7 +355,7 @@ function Get-QualityOptions {
     }
     $codecFormats = @(foreach ($format in $videoFormats) {
         $pictureKey = [string]$format.width + 'x' + $format.height
-        if ($h264Pictures.ContainsKey($pictureKey) -and $format.vcodec -notmatch '^(avc[13]|h264)(\.|$)') { continue }
+        if (-not $AllVariants -and $h264Pictures.ContainsKey($pictureKey) -and $format.vcodec -notmatch '^(avc[13]|h264)(\.|$)') { continue }
         $format
     })
     $mp4Pictures = @{}
@@ -218,7 +364,7 @@ function Get-QualityOptions {
     }
     $options = foreach ($format in $codecFormats) {
         $pictureKey = [string]$format.width + 'x' + $format.height
-        if ($mp4Pictures.ContainsKey($pictureKey) -and $format.ext -ne 'mp4') { continue }
+        if (-not $AllVariants -and $mp4Pictures.ContainsKey($pictureKey) -and $format.ext -ne 'mp4') { continue }
         $id = [string]$format.format_id
         $selector = if ($format.acodec -and $format.acodec -ne 'none') { $id } else { $id + '+ba[ext=m4a]/' + $id + '+ba' }
         $bitrate = if ($format.vbr -gt 0) { [double]$format.vbr } elseif ($format.tbr -gt 0) { [double]$format.tbr } else { 0 }
@@ -245,8 +391,48 @@ function Get-QualityOptions {
     return $options
 }
 
+function Select-VotBestQuality {
+    param([array]$Options, [int]$HeightLimit = 0, [double]$FpsLimit = 0)
+    $selected = $Options | Where-Object {
+        ($HeightLimit -eq 0 -or $_.Height -le $HeightLimit) -and ($FpsLimit -eq 0 -or $_.Fps -le $FpsLimit + 0.1)
+    } | Select-Object -First 1
+    if (-not $selected) { throw 'Нет формата в пределах выбранного разрешения и FPS. Качество не заменено другим.' }
+    return $selected
+}
+
+function Get-VotAutoQuality {
+    param($Metadata, [string]$Url, [bool]$AllVariants, [int]$HeightLimit, [double]$FpsLimit, [int]$CheckedHeight = 0, [double]$CheckedFps = 0)
+    $options = @(Get-QualityOptions $Metadata -AllVariants:$AllVariants)
+    $selected = Select-VotBestQuality $options $HeightLimit $FpsLimit
+    if ($CheckedHeight -gt 0 -and ($selected.Height -lt $CheckedHeight -or ($selected.Height -eq $CheckedHeight -and $selected.Fps + 0.1 -lt $CheckedFps))) {
+        Write-Host 'YouTube вернул качество ниже предварительно проверенного. Повторно запрашиваю список; качество не понижается.' -ForegroundColor Yellow
+        $freshMetadata = Get-VideoMetadata $Url
+        $options = @(Get-QualityOptions $freshMetadata -AllVariants:$AllVariants)
+        $selected = Select-VotBestQuality $options $HeightLimit $FpsLimit
+        if ($selected.Height -lt $CheckedHeight -or ($selected.Height -eq $CheckedHeight -and $selected.Fps + 0.1 -lt $CheckedFps)) { throw 'Список качества изменился относительно предварительной проверки. Ролик пропущен без понижения качества; повторите его позже.' }
+    }
+    return $selected
+}
+
+function Read-VotVideoQuality {
+    param($Metadata, [bool]$LocalFile = $false, [bool]$AllVariants = $false)
+    $options = @(Get-QualityOptions $Metadata -AllVariants:$AllVariants)
+    while ($true) {
+        Show-QualityOptions $options $LocalFile $allVariants
+        $count = $options.Count
+        if (-not $LocalFile -and -not $allVariants) { $count++; Write-Host ([string]$count + ' — Отобразить все варианты') }
+        $choice = Read-QualityChoice $count 1 (-not $LocalFile)
+        if ($choice.Number -gt $options.Count) {
+            $allVariants = $true
+            $options = @(Get-QualityOptions $Metadata -AllVariants)
+            continue
+        }
+        return [pscustomobject]@{Quality=$options[$choice.Number - 1]; Thumbnail=$choice.Thumbnail}
+    }
+}
+
 function Show-QualityOptions {
-    param([array]$Options)
+    param([array]$Options, [bool]$LocalFile = $false, [bool]$AllVariants = $false)
     $showFps = @($Options | Where-Object { $_.Fps -gt 0 } | ForEach-Object { [Math]::Round($_.Fps) } | Sort-Object -Unique).Count -gt 1
     $showBitrate = @($Options | Where-Object { $_.Bitrate -gt 0 } | ForEach-Object { [Math]::Round($_.Bitrate) } | Sort-Object -Unique).Count -gt 1
     $showCodec = @($Options.Codec | Sort-Object -Unique).Count -gt 1
@@ -279,7 +465,7 @@ function Show-QualityOptions {
         $widths[$field] = ($rows | ForEach-Object { ([string]$_.$field).Length } | Measure-Object -Maximum).Maximum
     }
     Write-Host ''
-    Write-Host 'Доступное качество (от большего к меньшему):' -ForegroundColor Cyan
+    Write-Host $(if ($LocalFile) { 'Качество локального исходника:' } else { 'Доступное качество (от большего к меньшему):' }) -ForegroundColor Cyan
     foreach ($row in $rows) {
         $cells = foreach ($field in $fields) { ([string]$row.$field).PadRight($widths[$field]) }
         Write-Host ($cells -join '  ')
@@ -287,9 +473,17 @@ function Show-QualityOptions {
     if (@($Options | Where-Object { $_.IsHls }).Count -gt 0) {
         Write-Host '* HLS: заявленная скорость потока, не измеренный средний битрейт. Большая цифра не гарантирует лучшее изображение или больший файл.'
     }
+    if ($LocalFile) {
+        Write-Host 'Сохраняются исходное разрешение и FPS. Для совместимых кодеков видео копируется без повторного сжатия.'
+        Write-Host 'Оригинальный звук 15%, перевод 100%. У файла нет обложки YouTube.'
+        return
+    }
     Write-Host 'Размер — только исходный видеопоток, без итоговой озвучки.'
-    Write-Host 'Для каждого разрешения: только H.264, если он доступен; иначе все доступные кодеки.'
-    Write-Host 'После выбора кодеков: только MP4, если он доступен для этого разрешения; иначе остальные контейнеры.'
+    if ($AllVariants) { Write-Host 'Показаны все доступные видеоварианты, без приоритетов H.264 и MP4.' }
+    else {
+        Write-Host 'Для каждого разрешения: только H.264, если он доступен; иначе все доступные кодеки.'
+        Write-Host 'После выбора кодеков: только MP4, если он доступен для этого разрешения; иначе остальные контейнеры.'
+    }
     Write-Host 'Контейнер в списке — исходный; готовое видео сохраняется в MP4.'
     Write-Host 'В каждом варианте: оригинальный звук 15%, перевод 100%.'
     Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Перекодирование сохраняет примерно исходный размер видеопотока.'
@@ -331,13 +525,13 @@ foreach ($requiredPath in @($nodeExe,$entryPoint,(Join-Path $binRoot 'yt-dlp.exe
     if (-not (Test-Path -LiteralPath $requiredPath)) { throw ('Не найден компонент: ' + $requiredPath) }
 }
 
-Write-Host ''
 $appVersion = (Get-Content -LiteralPath (Join-Path $appRoot 'package.json') -Raw | ConvertFrom-Json).version
-Write-Host ('VOT-CLI Live — озвучка видео (версия ' + $appVersion + ')') -ForegroundColor Cyan
-Write-Host 'Выберите языки, озвучку и качество видео.'
-Write-Host 'Результат: MP4. Для каждого разрешения приоритет H.264.'
-Write-Host ('Папка для видео: ' + $videoRoot)
-Write-Host ''
+if ($env:VOT_QUEUE_WORKER -ne '1') {
+    Write-Host ''
+    Write-Host ('VOT-CLI Live — озвучка видео (версия ' + $appVersion + ')') -ForegroundColor Cyan
+    Write-Host ('Папка для видео: ' + $videoRoot)
+    Write-Host ''
+}
 
 if ($CheckOnly) {
     & $nodeExe $entryPoint --version
@@ -353,36 +547,55 @@ do {
     $configureLanguages = $false
     $requestedSource = $SourceLanguage
     $selectedTarget = $TargetLanguage
-    if (-not $VideoUrl) {
-        Write-Host '1 — Скачать видео: английский → русский'
-        Write-Host '2 — Скачать видео — выбрать другие языки'
-        Write-Host '3 — Показать справку оригинальной утилиты'
-        Write-Host '0 — Выход'
+    if (-not $VideoUrl -and -not $LocalVideo) {
         Set-VotState 'awaiting_menu'
-        $menuChoice = Read-Host 'Выберите пункт'
-        if ($menuChoice -eq '0') { Set-VotState 'closed'; break }
-        if ($menuChoice -eq '3') { & $nodeExe $entryPoint --help; Write-Host ''; continue }
-        if ($menuChoice -notin @('1','2')) { continue }
-        if ($menuChoice -eq '1') { $requestedSource = 'en'; $selectedTarget = 'ru' }
-        else { $configureLanguages = $true }
+        $action = Read-VotMainAction
+        if ($action -eq 'exit') { Set-VotState 'closed'; break }
+        if ($action -in @('channel','batch','resume')) {
+            try {
+                if ($action -eq 'resume') { Resume-VotQueue }
+                else { New-VotQueue $action }
+            } catch { Write-Host $_.Exception.Message -ForegroundColor Yellow }
+            Write-Host ''; continue
+        }
+        $configureLanguages = $true
         Set-VotState 'awaiting_url'
-        $VideoUrl = Read-Host 'Вставьте ссылку на YouTube-видео'
+        $VideoUrl = if ($action -eq 'local') { '2' } else { Read-Host 'Вставьте ссылку на YouTube' }
     }
     $jobRoot = $null
     $workVideo = $null
     $votExitCode = $null
     $resultSaved = $false
     $downloadFailed = $false
+    $currentAttempt = if ($Once -and $AttemptId) { $AttemptId } else { [Guid]::NewGuid().ToString('N') }
+    $diagnosticDirectory = if ($ResultFile) { Split-Path $ResultFile -Parent } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'VOT-CLI-Live\diagnostics' }
+    $diagnosticFile = Join-Path $diagnosticDirectory ('diagnostic-' + $currentAttempt + '.jsonl')
+    $outcome = [pscustomobject]@{attemptId=$currentAttempt; success=$false; output=''; title=''; error=''; authSource='none'; diagnosticFile=$diagnosticFile}
+    $diagnosticEnvironment = @{}
+    foreach ($variable in @('VOT_DIAGNOSTIC_FILE','VOT_ATTEMPT_ID','VOT_DIAGNOSTIC_HELPER')) { $diagnosticEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable,'Process') }
+    $savedOauthToken = $env:YANDEX_OAUTH_TOKEN
     try {
-        $canonicalUrl = Get-CanonicalVideoUrl $VideoUrl
+        $env:VOT_DIAGNOSTIC_FILE = $diagnosticFile
+        $env:VOT_ATTEMPT_ID = $currentAttempt
+        $env:VOT_DIAGNOSTIC_HELPER = Join-Path $appRoot 'src\diagnostics.js'
+        Write-VotDiagnostic 'attempt.start' @{version=$appVersion;powerShell=$PSVersionTable.PSVersion.ToString();ytdlp=((& $env:VOT_YTDLP_EXE --version) -join '').Trim();ffmpeg=((& $env:VOT_FFMPEG_EXE -version | Select-Object -First 1) -split '\s+')[2]}
+        $selectedLocalVideo = $LocalVideo
+        if (([string]$VideoUrl).Trim() -eq '2' -and -not $selectedLocalVideo) { $selectedLocalVideo = Select-LocalVideoFile }
+        $isLocalVideo = -not [string]::IsNullOrWhiteSpace($selectedLocalVideo)
+        $canonicalUrl = if ($isLocalVideo) { '' } else { Get-CanonicalVideoUrl $VideoUrl }
         if ($configureLanguages) {
-            Set-VotState 'awaiting_source_language'
-            $requestedSource = Read-LanguageChoice 'С какого языка переводить' $languageConfig.source 'auto'
-            Set-VotState 'awaiting_target_language'
-            $selectedTarget = Read-LanguageChoice 'На какой язык озвучить' $languageConfig.target 'ru'
+            Set-VotState 'awaiting_language'
+            $languages = Read-VotLanguageSettings
+            $requestedSource = $languages.Source
+            $selectedTarget = $languages.Target
         }
         Set-VotState 'fetching_formats'
-        $metadata = Get-VideoMetadata $canonicalUrl
+        $metadata = if ($isLocalVideo) { Get-LocalVideoMetadata $selectedLocalVideo } else { Get-VideoMetadata $canonicalUrl }
+        $outcome.title = [string]$metadata.title
+        if ($isLocalVideo) {
+            Write-Host ('Выбран файл: ' + $metadata.LocalPath) -ForegroundColor Cyan
+            Write-Host 'Перевод выполняется онлайн: программа временно предоставит Яндексу доступ только к этому ролику.'
+        }
         $sourceLanguage = if ($requestedSource -eq 'auto') { Get-DetectedSourceLanguage $metadata } else { $requestedSource }
         $sourceName = ($languageConfig.source | Where-Object { $_.code -eq $sourceLanguage }).name
         $targetName = ($languageConfig.target | Where-Object { $_.code -eq $selectedTarget }).name
@@ -407,31 +620,44 @@ do {
         if ($selectedVoice -eq 'live' -and -not $canUseLive) {
             throw '«Живые голоса» поддерживают английский → русский. Для этой языковой пары выберите другую озвучку.'
         }
+        if ($selectedVoice -eq 'live') {
+            $storedToken = Get-VotYandexToken
+            if ($storedToken) {
+                $env:YANDEX_OAUTH_TOKEN = $storedToken
+                $outcome.authSource = 'saved'
+                Write-Host 'Используется сохранённый вход Яндекса.'
+            }
+            elseif ($env:YANDEX_OAUTH_TOKEN -or $env:YANDEX_API_TOKEN) { $outcome.authSource = 'environment'; Write-Host 'Используется вход Яндекса, переданный процессу.' }
+            elseif ($isLocalVideo) { $env:YANDEX_OAUTH_TOKEN = Read-LocalLiveToken; $outcome.authSource = 'saved' }
+            $storedToken = $null
+        }
         $selectedTtsVoice = ''
         if ($selectedVoice -eq 'edge') { $selectedTtsVoice = Read-MicrosoftVoice $selectedTarget $TtsVoice }
+        Write-VotDiagnostic 'attempt.settings' @{source=$(if($isLocalVideo){'local'}else{'youtube'});videoId=$(if($isLocalVideo){$null}else{$metadata.id});sourceLanguage=$sourceLanguage;targetLanguage=$selectedTarget;voice=$selectedVoice;authSource=$outcome.authSource}
         Write-Host ('Видео: ' + $metadata.title)
-        $qualityOptions = @(Get-QualityOptions $metadata)
-        Show-QualityOptions $qualityOptions
+        $allVariants = [bool]$ShowAllFormats -or [bool]$VideoFormatId
+        $qualityOptions = @(Get-QualityOptions $metadata -AllVariants:$allVariants)
         $addThumbnail = [bool]$ThumbnailFirstFrame
         if ($VideoFormatId) {
             $selectedQuality = $qualityOptions | Where-Object { $_.Id -eq $VideoFormatId } | Select-Object -First 1
             if (-not $selectedQuality) { throw ('У ролика нет формата ' + $VideoFormatId + '.') }
-        } elseif ($Once -and $MaxHeight -gt 0) {
-            $selectedQuality = $qualityOptions | Where-Object { $_.Height -le $MaxHeight } | Select-Object -First 1
-            if (-not $selectedQuality) { throw 'Нет формата в пределах указанной высоты.' }
+        } elseif ($AutoQuality -or ($Once -and $MaxHeight -gt 0)) {
+            $selectedQuality = Get-VotAutoQuality $metadata $canonicalUrl $allVariants $MaxHeight $MaxFps $ExpectedHeight $ExpectedFps
         } else {
             Set-VotState 'awaiting_quality'
-            $qualityChoice = Read-QualityChoice $qualityOptions.Count 1
-            $selectedQuality = $qualityOptions[$qualityChoice.Number - 1]
+            $qualityChoice = Read-VotVideoQuality $metadata $isLocalVideo $allVariants
+            $selectedQuality = $qualityChoice.Quality
             $addThumbnail = $addThumbnail -or $qualityChoice.Thumbnail
         }
+        if ($isLocalVideo -and $addThumbnail) { throw 'Для локального файла обложка YouTube недоступна.' }
         $thumbnailUrl = if ($addThumbnail) { Get-ThumbnailUrl $metadata } else { '' }
         $jobName = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6)
+        Write-VotDiagnostic 'quality.selected' @{selector=$selectedQuality.Selector;width=$selectedQuality.Width;height=$selectedQuality.Height;codec=$selectedQuality.Codec;thumbnail=$addThumbnail;originalVolume=0.15;translationVolume=1}
         $jobRoot = Join-Path $jobsRoot $jobName
         New-Item -ItemType Directory -Path $jobRoot -Force | Out-Null
         Set-VotState 'running' $jobRoot
         Write-Host ('Выбрано: ' + $selectedQuality.Quality + ', ' + $selectedQuality.Width + '×' + $selectedQuality.Height + ', ' + $selectedQuality.Codec)
-        Write-Host 'Получение перевода и скачивание видео…' -ForegroundColor Cyan
+        Write-Host $(if ($isLocalVideo) { 'Получение перевода и сборка видео…' } else { 'Получение перевода и скачивание видео…' }) -ForegroundColor Cyan
         $votArguments = @($entryPoint, ('--voice-style=' + $selectedVoice), ('--lang=' + $sourceLanguage), ('--reslang=' + $selectedTarget), '--merge-video', ('--video-format=' + $selectedQuality.Selector), ('--video-title=' + $metadata.title), ('--video-duration=' + $metadata.duration), '--keep-original-audio=true', '--normalize-audio=false', '--original-volume=0.15', '--translation-volume=1', '--translation-timeout=900', ('--output=' + $jobRoot), '--output-file=video-ru')
         if ($addThumbnail) {
             Write-Host 'Первый кадр: обложка YouTube. Видео будет перекодировано в H.264 с сохранением разрешения и частоты кадров.' -ForegroundColor Cyan
@@ -442,9 +668,15 @@ do {
             $metadata | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
             $votArguments += @(('--tts-voice=' + $selectedTtsVoice), ('--video-metadata=' + $metadataPath))
         }
-        $votArguments += $canonicalUrl
+        if ($isLocalVideo) {
+            & (Join-Path $PSScriptRoot 'Bootstrap-LocalVideo.ps1') -BinRoot $binRoot
+            $env:VOT_PARENT_PID = [string]$PID
+            $votArguments[0] = Join-Path $appRoot 'src\localVideo.js'
+            $votArguments += '--source=' + $metadata.LocalPath
+        } else { $votArguments += $canonicalUrl }
         & $nodeExe @votArguments
         $votExitCode = $LASTEXITCODE
+        Write-VotDiagnostic 'worker.exit' @{exitCode=$votExitCode}
         $workVideo = Join-Path $jobRoot 'video-ru.mp4'
         if ($votExitCode -ne 0 -or -not (Test-Path -LiteralPath $workVideo) -or (Get-Item -LiteralPath $workVideo).Length -eq 0) {
             throw ('Видео не создано. Код завершения: ' + $votExitCode + '. Сообщение сервиса находится выше.')
@@ -452,21 +684,35 @@ do {
         $resultVideo = Get-DesktopResultPath ([string]$metadata.title)
         Move-Item -LiteralPath $workVideo -Destination $resultVideo
         $resultSaved = $true
+        $outcome.success = $true; $outcome.output = $resultVideo
         Set-VotState 'completed' $resultVideo
         Write-Host ('Готово: ' + $resultVideo) -ForegroundColor Green
     } catch {
+        Write-VotDiagnostic 'attempt.error' @{message=$_.Exception.Message}
         $downloadFailed = $true
+        $outcome.error = $_.Exception.Message
         Set-VotState 'failed' $_.Exception.Message
-        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor $(if ($_.Exception -is [OperationCanceledException]) { 'Yellow' } else { 'Red' })
     } finally {
+        [Environment]::SetEnvironmentVariable('YANDEX_OAUTH_TOKEN', $savedOauthToken, 'Process')
         if (-not $resultSaved -and $votExitCode -eq 0 -and $workVideo -and (Test-Path -LiteralPath $workVideo)) {
             Write-Host ('Сохранение на рабочий стол не удалось. Готовый файл оставлен здесь: ' + $workVideo) -ForegroundColor Yellow
         } else {
             try { Remove-VotJob $jobRoot }
-            catch { Write-Host $_.Exception.Message -ForegroundColor Yellow }
+            catch { Write-VotDiagnostic 'cleanup.error' @{message=$_.Exception.Message}; Write-Host $_.Exception.Message -ForegroundColor Yellow }
         }
+        Write-VotDiagnostic 'attempt.finish' @{success=$outcome.success;workerExitCode=$votExitCode;outputSaved=$resultSaved}
+        Write-Host ('Диагностика: ' + $diagnosticFile) -ForegroundColor Cyan
+        foreach ($variable in $diagnosticEnvironment.Keys) {
+            if ($null -eq $diagnosticEnvironment[$variable]) { Remove-Item -LiteralPath ('Env:' + $variable) -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($variable,$diagnosticEnvironment[$variable],'Process') }
+        }
+    }
+    if ($ResultFile) {
+        $outcome | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultFile -Encoding UTF8
     }
     if ($Once) { if ($downloadFailed) { exit 1 }; exit 0 }
     $VideoUrl = ''
+    $LocalVideo = ''
     Write-Host ''
 } while ($true)

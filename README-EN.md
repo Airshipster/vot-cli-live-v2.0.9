@@ -1,131 +1,18 @@
-# VOT-CLI Live 2.0
+# VOT-CLI Live v2.1.0 for Windows
 
-[![npm version](https://img.shields.io/npm/v/vot-cli-live)](https://www.npmjs.com/package/vot-cli-live)
-[![GitHub](https://img.shields.io/github/stars/fantomcheg/vot-cli-live)](https://github.com/fantomcheg/vot-cli-live)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**First read the [upstream README](https://github.com/fantomcheg/vot-cli-live/blob/main/README.md).** This fork extends fantomcheg/vot-cli-live, which originates from FOSWLY/vot-cli by Toil / @ToilOfficial. See the full [Russian README](README.md) and [change summary](LOCAL-CHANGES.md).
 
-A CLI for downloading Yandex VOT translations and subtitles. This fork keeps
-lively voices, quiet/JSON output, and translated video creation with `yt-dlp`
-and `ffmpeg`.
+Install PowerShell 7, download and extract this repository, then open `Start-VOT.cmd`. Missing dependencies are prepared locally. Output is a translated MP4 on the current user's Desktop; each user supplies their own account access if required.
 
-Version 2.0 replaces the obsolete hand-written protobuf requests with the
-current [`vot.js`](https://github.com/FOSWLY/vot.js) client. This fixes the
-`Translation not available`, HTTP 400, and cold-start failures caused by recent
-Yandex API changes.
+- YouTube videos, channels, playlists and mixed batches; exclusions, duplicate removal, saved queues and resume.
+- Local video selection using the Windows file picker. Translation is online; Yandex accesses the selected file through a temporary HTTPS tunnel.
+- Yandex standard voices, Yandex live voices for English to Russian, Microsoft Edge neural voices. Edge mode relies on timed subtitles.
+- Automatic source-language detection and supported language-pair selection.
+- Best quality per video, resolution limits, H.264/MP4 preferences per frame size, optional unfiltered formats, no artificial 1080p cap.
+- Gradual mode by default: fetch formats before each video, sequential fragments, 10-second intervals. Preflight mode scans the list first and processes videos one by one with four fragment streams.
+- Original audio 15%, translation 100%, optional YouTube thumbnail as the first frame using `number 000` at the quality prompt.
+- Single-line progress, queue totals, bounded retries and diagnostics with secret redaction.
 
-> This project is intended for research and personal use only. It is not
-> affiliated with Yandex.
+No user credentials, sessions, private queues or downloaded media are included. Optional Yandex access is stored locally with Windows DPAPI; see [privacy notes](PRIVACY.md). The upstream OAuth application is named **Text To Morse**. This is the upstream login mechanism, not an embedded account.
 
-## Important changes
-
-- Standard TTS does not require authentication.
-- Lively voices require a Yandex OAuth token and support only `en → ru`.
-- Without a token, the CLI falls back to standard TTS with a warning.
-- Existing `--output`, `--output-file`, and `--voice-style` scripts remain compatible.
-- Translation polling now waits up to 60 minutes by default.
-
-## Installation
-
-```bash
-npm install -g vot-cli-live
-```
-
-Requirements: Node.js 22.19+, optional `yt-dlp`, and `ffmpeg` for `--merge-video`.
-
-From source:
-
-```bash
-git clone https://github.com/fantomcheg/vot-cli-live.git
-cd vot-cli-live
-npm install
-npm link
-```
-
-## Quick start
-
-Standard TTS:
-
-```bash
-vot-cli-live --voice-style=tts --output=. "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-Lively voices:
-
-```bash
-export YANDEX_OAUTH_TOKEN="your-token"
-vot-cli-live --voice-style=live --output=. "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-You may also use `--api-token`, but an environment variable is safer because it
-does not expose the token in shell history or the process list. See the
-[official Yandex ID instructions](https://yandex.ru/dev/id/doc/en/tokens/debug-token)
-for manual token creation. Never commit or publish your token.
-
-## Create a translated video
-
-```bash
-vot-cli-live \
-  --output=. \
-  --merge-video \
-  --original-volume=0.3 \
-  --translation-volume=1.5 \
-  "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-To replace the original audio:
-
-```bash
-vot-cli-live --output=. --merge-video --keep-original-audio=false "URL"
-```
-
-## Automation
-
-Plain output:
-
-```bash
-vot-cli-live --quiet "URL"
-```
-
-JSON output:
-
-```bash
-vot-cli-live --json "URL"
-```
-
-## Subtitles
-
-```bash
-vot-cli-live --subs --output=. --reslang=ru "URL"
-vot-cli-live --subs-srt --output=. --reslang=ru "URL"
-```
-
-## Main options
-
-| Option | Purpose |
-| --- | --- |
-| `--output=<path>` | Output directory |
-| `--output-file=<name>` | Output filename |
-| `--lang=<code>` | Source language, default `en` |
-| `--reslang=<code>` | Translation language, default `ru` |
-| `--voice-style=live\|tts` | Voice type |
-| `--api-token=<token>` | OAuth token for lively voices |
-| `--translation-timeout=<sec>` | Maximum wait, default `3600` |
-| `--proxy=<URL>` | HTTP/HTTPS proxy |
-| `--merge-video` | Download video and embed translation |
-| `--keep-original-audio` | Mix original and translated audio |
-| `--normalize-audio` | Normalize the mixed track |
-| `--original-volume=0..2` | Original track volume |
-| `--translation-volume=0..2` | Translation volume |
-| `--quiet` | Print only the result |
-| `--json` | Structured JSON output |
-| `--subs`, `--subs-srt` | Download subtitles |
-
-## Limitations
-
-- Yandex does not translate videos longer than four hours; split them first.
-- Lively voices are limited to `en → ru` and require a valid OAuth token.
-- Yandex determines whether a particular video is available for translation.
-- Video merging depends on the installed `yt-dlp` version supporting the URL.
-
-See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) and
-[changelog.md](./changelog.md) for more details.
+External services may reject requests; gradual mode does not guarantee error-free processing. The repository URL retains `v2.0.9` from its creation; this release is **2.1.0**.

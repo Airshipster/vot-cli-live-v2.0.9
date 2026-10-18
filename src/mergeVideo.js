@@ -3,44 +3,93 @@ import fs from "node:fs";
 import path from "node:path";
 import axios from "axios";
 import { createProgress } from "./progress.js";
+import { diagnostic, errorDetails } from "./diagnostics.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 const executable = (variable, name) =>
   process.env[variable] || (process.platform === "win32" ? `${name}.exe` : name);
 
 export async function runTool(file, args, options = {}) {
-  const { onLine, ...execOptions } = options;
+  const { onLine, diagnosticStage = 'media.tool', ...execOptions } = options;
+  const started = Date.now();
+  const tool = path.basename(file);
+  const invocation = `tool-${process.pid}-${started}-${Math.random().toString(16).slice(2,8)}`;
+  let messages = 0;
+  let httpStatus;
+  diagnostic('tool.start', {invocation,stage:diagnosticStage,tool,timeoutMs:execOptions.timeout ?? 600_000});
   return new Promise((resolve, reject) => {
     const child = execFile(file, args, {
       windowsHide: true, timeout: 600_000, maxBuffer: 16 * 1024 * 1024, encoding: "utf8",
       ...execOptions,
     }, (error, stdout, stderr) => {
-      if (!error) { resolve({ stdout, stderr }); return; }
+      if (!error) { diagnostic('tool.finish', {invocation,stage:diagnosticStage,tool,durationMs:Date.now()-started}); resolve({ stdout, stderr }); return; }
       const details = error.killed
         ? "Превышено время ожидания."
         : String(stderr || error.message).trim().slice(-1800);
-      reject(new Error(`${path.basename(file)}: ${details}`));
+      diagnostic('tool.error', {invocation,stage:diagnosticStage,tool,durationMs:Date.now()-started,
+        exitCode:error.code,signal:error.signal,killed:Boolean(error.killed),error:errorDetails({name:error.name,code:error.code,httpStatus,message:details,cause:error.cause}),stderrTail:details});
+      const failure = new Error(`${path.basename(file)}: ${details}`);
+      if (httpStatus) failure.httpStatus = httpStatus;
+      reject(failure);
     });
-    if (!onLine) return;
+    function receive(line) {
+      const status = /HTTP(?: Error)?\s+(\d{3})\b/i.exec(line);
+      if (status) httpStatus = Number(status[1]);
+      if (messages < 60 && /^(?:WARNING:|ERROR:|\[(?:youtube|info|download|Merger|VideoRemuxer)\])/.test(line) && !/^\[download\]\s+[\d.]+%/.test(line)) {
+        messages++;
+        diagnostic('tool.message', {invocation,stage:diagnosticStage,tool,message:line});
+      }
+      onLine?.(line);
+    }
     for (const stream of [child.stdout, child.stderr]) {
       let pending = "";
       stream.on("data", (chunk) => {
         pending += chunk;
         const lines = pending.split(/\r?\n|\r/);
         pending = lines.pop();
-        for (const line of lines) onLine(line);
+        for (const line of lines) receive(line);
       });
-      stream.on("end", () => { if (pending) onLine(pending); });
+      stream.on("end", () => { if (pending) receive(pending); });
     }
   });
+}
+
+export async function runYouTubeTool(file, args, options = {}) {
+  const { onRetry, retryDelayMs = 30_000, ...toolOptions } = options;
+  let attemptArgs = [...args];
+  diagnostic('media.request.policy', {provider:'youtube',stage:toolOptions.diagnosticStage || 'youtube.download',requestMode:process.env.VOT_REQUEST_MODE === 'gradual' ? 'gradual' : 'preflight',concurrentFragments:Number(attemptArgs[attemptArgs.indexOf('--concurrent-fragments')+1]) || undefined});
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try { return await runTool(file, attemptArgs, {timeout:0,...toolOptions}); }
+    catch (error) {
+      error.provider = 'youtube';
+      error.stage = toolOptions.diagnosticStage || 'youtube.download';
+      const httpStatus = error.httpStatus || Number(/HTTP(?: Error)?\s*(401|403)\b/i.exec(error.message)?.[1]);
+      if (attempt === 2 || ![401,403].includes(httpStatus) || toolOptions.signal?.aborted) throw error;
+      const fragmentOption = attemptArgs.indexOf('--concurrent-fragments');
+      if (fragmentOption >= 0) attemptArgs[fragmentOption + 1] = '1';
+      diagnostic('media.download.retry', {provider:'youtube',stage:error.stage,attempt,nextAttempt:2,httpStatus,delaySeconds:retryDelayMs/1000,concurrentFragments:fragmentOption >= 0 ? 1 : undefined,error:errorDetails(error)});
+      await onRetry?.();
+      if (!process.env.VOT_CLI_QUIET) console.log(`YouTube вернул HTTP ${httpStatus}. Повтор 2/2 через ${retryDelayMs/1000} с с обновлением ссылок; фрагменты последовательно, выбранные потоки сохраняются.`);
+      try { await delay(retryDelayMs, undefined, {signal:toolOptions.signal}); }
+      catch (waitingError) { waitingError.provider='youtube'; waitingError.stage=error.stage; throw waitingError; }
+    }
+  }
+}
+
+export function getYouTubeFragmentConcurrency() {
+  return process.env.VOT_REQUEST_MODE === 'gradual' ? 1 : 4;
 }
 
 export async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl, maxHeight = 0, selectedFormat) {
   const heightFilter = maxHeight ? `[height<=${maxHeight}]` : "";
   const format = selectedFormat ||
     `bv${heightFilter}[ext=mp4]+ba[ext=m4a]/bv${heightFilter}+ba/b${heightFilter}`;
+  const concurrentFragments = getYouTubeFragmentConcurrency();
+  diagnostic('media.download.start', {provider:'youtube',selector:format,maxHeight,concurrentFragments,requestMode:process.env.VOT_REQUEST_MODE === 'gradual' ? 'gradual' : 'preflight',socketTimeoutSeconds:30,retries:3,fragmentRetries:3});
   const videoPath = path.join(outputDir, `temp_video_${Date.now()}.mp4`);
   const args = [
-    "--ignore-config", "--no-playlist", "--progress", "--newline", "--progress-delta", "1", "--no-simulate",
+    "--ignore-config", "--no-playlist", "--no-quiet", "--progress", "--newline", "--progress-delta", "1", "--no-simulate",
+    "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3", "--abort-on-unavailable-fragments", "--concurrent-fragments", String(concurrentFragments),
     "--progress-template", "download:VOT_PROGRESS:%(info.format_id)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.eta)s|%(progress.fragment_index)s|%(progress.fragment_count)s|%(progress.status)s|%(info.vcodec)s",
     "--js-runtimes", `node:${process.env.VOT_NODE_EXE || process.execPath}`,
     "-f", format, "--merge-output-format", "mp4", "--remux-video", "mp4",
@@ -53,9 +102,13 @@ export async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl, maxHei
   args.push(videoUrl);
   let progress;
   let currentFormat;
+  let lastSample = 0;
   let stdout;
   try {
-    ({ stdout } = await runTool(executable("VOT_YTDLP_EXE", "yt-dlp"), args, {
+    ({ stdout } = await runYouTubeTool(executable("VOT_YTDLP_EXE", "yt-dlp"), args, {
+      diagnosticStage:'youtube.media.download',
+      timeout:0,
+      onRetry() { progress?.fail(); progress=undefined; currentFormat=undefined; lastSample=0; },
       onLine(line) {
         if (!line.startsWith("VOT_PROGRESS:")) return;
         const [formatId, downloaded, total, estimate, eta, fragment, fragmentCount, status, vcodec] =
@@ -63,12 +116,18 @@ export async function downloadYouTubeVideo(videoUrl, outputDir, proxyUrl, maxHei
         if (formatId !== currentFormat) {
           progress?.fail();
           currentFormat = formatId;
+          lastSample = 0;
+          diagnostic('media.stream.start', {formatId,vcodec});
           progress = createProgress(vcodec === "none" ? "Скачивание оригинального звука" : "Скачивание видео");
         }
         const totalBytes = Number(total) || Number(estimate);
         const percent = totalBytes > 0 ? Number(downloaded) / totalBytes * 100
           : Number(fragmentCount) > 0 ? Number(fragment) / Number(fragmentCount) * 100 : NaN;
-        if (status === "finished") progress.finish();
+        if (Date.now() - lastSample >= 30_000) {
+          diagnostic('media.stream.progress', {formatId,bytes:Number(downloaded),totalBytes:Number(total),estimatedBytes:Number(estimate),fragment:Number(fragment),fragmentCount:Number(fragmentCount)});
+          lastSample = Date.now();
+        }
+        if (status === "finished") { diagnostic('media.stream.finish', {formatId,vcodec,bytes:Number(downloaded),fragments:Number(fragmentCount) || undefined}); progress.finish(); }
         else progress.update(percent, Number(eta));
       },
     }));
@@ -174,6 +233,7 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
   progress.update(0);
   try {
     await runTool(executable("VOT_FFMPEG_EXE", "ffmpeg"), args, {
+      diagnosticStage:'media.merge',
       timeout: thumbnailPath && Number.isFinite(duration)
         ? Math.min(2_147_483_647, Math.ceil(Math.max(900_000, duration * 10_000))) : 900_000,
       onLine(line) {
@@ -187,18 +247,26 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
 }
 
 export async function createVideoWithTranslation(videoUrl, audioPath, outputPath, options = {}) {
-  const { proxyUrl, maxHeight = 0, videoFormat, thumbnailUrl, ...mergeOptions } = options;
+  const { proxyUrl, maxHeight = 0, videoFormat, thumbnailUrl, localVideoPath, ...mergeOptions } = options;
   let videoPath;
   let thumbnailPath;
   try {
     if (thumbnailUrl) thumbnailPath = await downloadThumbnail(thumbnailUrl, path.dirname(outputPath));
-    if (!process.env.VOT_CLI_QUIET) console.log("Скачивание видео и оригинального звука...");
-    videoPath = await downloadYouTubeVideo(videoUrl, path.dirname(outputPath), proxyUrl, maxHeight, videoFormat);
+    if (localVideoPath) {
+      videoPath = fs.realpathSync(localVideoPath);
+      if (!fs.statSync(videoPath).isFile() || path.resolve(videoPath).toLowerCase() === path.resolve(outputPath).toLowerCase()) {
+        throw new Error("Некорректный путь локального исходника или результата.");
+      }
+      if (!process.env.VOT_CLI_QUIET) console.log("Используется выбранный локальный видеофайл.");
+    } else {
+      if (!process.env.VOT_CLI_QUIET) console.log("Скачивание видео и оригинального звука...");
+      videoPath = await downloadYouTubeVideo(videoUrl, path.dirname(outputPath), proxyUrl, maxHeight, videoFormat);
+    }
     if (!process.env.VOT_CLI_QUIET) console.log("Объединение видео с переводом...");
     await mergeVideoWithAudio(videoPath, audioPath, outputPath, { ...mergeOptions, thumbnailPath });
     if (!process.env.VOT_CLI_QUIET) console.log(`✅ Видео с переводом сохранено: ${outputPath}`);
   } finally {
-    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    if (!localVideoPath && videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
     if (thumbnailPath && fs.existsSync(thumbnailPath)) fs.unlinkSync(thumbnailPath);
   }
 }

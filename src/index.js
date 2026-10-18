@@ -24,9 +24,12 @@ import { clearFileName } from "./utils/utils.js";
 import parseProxy from "./proxy.js";
 import coursehunterUtils from "./utils/coursehunter.js";
 import { createVideoWithTranslation } from "./mergeVideo.js";
+import { downloadTranslationAudio } from "./youtubeTranslationAudio.js";
 import getVideoTitle from "./utils/getVideoTitle.js";
-import { formatDuration } from "./progress.js";
+import { formatDuration, createStatusLine } from "./progress.js";
 import { createEdgeAudio } from "./edgeTts.js";
+import { uploadLocalMedia } from "./localMediaUpload.js";
+import { diagnostic, errorDetails, tracedFetch } from "./diagnostics.js";
 
 // Автоматически читаем версию из package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -35,6 +38,9 @@ const packageJson = JSON.parse(
   fs.readFileSync(join(__dirname, "../package.json"), "utf8"),
 );
 const version = packageJson.version;
+const QUEUE_WORKER = process.env.VOT_QUEUE_WORKER === '1';
+diagnostic('runtime.start', {version,node:process.version,sdk:packageJson.dependencies['@vot.js/node']});
+process.once('exit', code => diagnostic('runtime.exit', {exitCode:code}));
 const HELP_MESSAGE = `
 A small script that allows you to download an audio translation from Yandex via the terminal.
 
@@ -275,18 +281,13 @@ const fetchOpts = {
 };
 const votClient = new VOTClient({
   apiToken: API_TOKEN,
-  fetchFn: async (url, options) => {
+  fetchFn: tracedFetch(async (url, options) => {
     const response = await undici.fetch(url, {
       ...options,
       signal: options.signal || AbortSignal.timeout(30000),
     });
-    if (!response.ok) {
-      await response.body?.cancel();
-      const requestUrl = new URL(url);
-      throw new Error(`HTTP ${response.status} (${requestUrl.hostname}${requestUrl.pathname})`);
-    }
     return response;
-  },
+  }),
   fetchOpts,
 });
 
@@ -315,24 +316,62 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES, video
   const deadline = startedAt + TRANSLATION_TIMEOUT_SECONDS * 1000;
   let attempt = 0;
   let transientFailures = 0;
-  let firstRequest = true;
+  let cacheRestartUsed = false;
+  let cacheRestartPending = false;
+  const uploadedLocalTranslations = new Set();
+  let youtubeUploadPath;
+  let waiting = createStatusLine();
+  diagnostic('translation.start', {provider:'yandex',platform:videoData.host,source:REQUEST_LANG,target:RESPONSE_LANG,
+    voice:useLiveVoices?'live':'tts',authenticated:Boolean(API_TOKEN),timeoutSeconds:TRANSLATION_TIMEOUT_SECONDS,firstRequest:true,sendFailedAudio:false});
 
   while (Date.now() < deadline) {
     attempt += 1;
+    const requestedAt = Date.now();
+    const bypassCache = cacheRestartPending;
+    cacheRestartPending = false;
+    if (bypassCache) uploadedLocalTranslations.clear();
+    diagnostic('translation.request', {provider:'yandex',poll:attempt,bypassCache,firstRequest:true});
     try {
       const result = await votClient.translateVideo({
         videoData,
         requestLang: REQUEST_LANG,
         responseLang: RESPONSE_LANG,
+        shouldSendFailedAudio: false,
         extraOpts: {
           useLivelyVoice: useLiveVoices,
           videoTitle,
-          firstRequest,
+          firstRequest: true,
+          bypassCache,
         },
       });
-      firstRequest = false;
+      diagnostic('translation.response', {provider:'yandex',poll:attempt,durationMs:Date.now()-requestedAt,
+        status:result.status,translated:Boolean(result.translated),hasAudioUrl:Boolean(result.url),remainingSeconds:result.remainingTime,
+        elapsedSeconds:Math.floor((Date.now()-startedAt)/1000)});
+
+      if (result.status === 6 && (process.env.VOT_LOCAL_UPLOAD_PATH || videoData.host === 'youtube')) {
+        waiting.finish();
+        waiting = createStatusLine();
+        if (uploadedLocalTranslations.has(result.translationId)) {
+          throw new Error('Яндекс повторно запросил уже переданный файл и не подтвердил начало перевода.');
+        }
+        let uploadPath = process.env.VOT_LOCAL_UPLOAD_PATH;
+        if (!uploadPath) {
+          if (!OUTPUT_DIR) throw new Error('Для передачи дорожки YouTube задайте папку --output.');
+          if (!youtubeUploadPath) {
+            log('Яндекс запросил исходную дорожку. Подготовка файла для перевода; качество итогового видео не меняется.');
+            youtubeUploadPath = await downloadTranslationAudio(videoData.url, OUTPUT_DIR, proxyData?.proxyUrl,
+              AbortSignal.timeout(Math.max(1, deadline - Date.now())));
+          }
+          uploadPath = youtubeUploadPath;
+        }
+        await uploadLocalMedia(votClient.provider, videoData.url, result.translationId,
+          uploadPath, AbortSignal.timeout(Math.max(1, deadline - Date.now())));
+        uploadedLocalTranslations.add(result.translationId);
+      }
 
       if (result.translated && result.url && result.status !== 5) {
+        waiting.finish();
+        diagnostic('translation.finish', {polls:attempt,durationMs:Date.now()-startedAt});
         task.title = "Video translated successfully.";
         log("   └─ Ссылка на полную дорожку перевода получена.");
         return {
@@ -343,13 +382,14 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES, video
 
       const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
       const suggestedDelay = Number(result.remainingTime) || 30;
-      const retryDelaySeconds = Math.min(30, Math.max(5, suggestedDelay));
+      const retryDelaySeconds = Math.min(30, Math.max(videoData.host === 'custom' ? 15 : 5, suggestedDelay));
       task.title = `⏳ Translation in progress... (${elapsedSeconds}s elapsed, attempt ${attempt})`;
       const remaining = Number(result.remainingTime);
-      log(`Ожидание перевода Яндекса: прошло ${formatDuration(elapsedSeconds)}` +
-        (remaining > 0 ? `; осталось ≈${formatDuration(remaining)}.` : "; сервис ещё готовит дорожку."));
+      waiting.update(`Ожидание перевода Яндекса: прошло ${formatDuration(elapsedSeconds)}` +
+        (remaining > 5 ? `; оценка сервиса ≈${formatDuration(remaining)}.` : "; сервис ещё готовит дорожку, точное время неизвестно."));
       await sleep(retryDelaySeconds * 1000);
     } catch (error) {
+      diagnostic('translation.error', {provider:error.provider || 'yandex',stage:error.stage || 'yandex.translation',poll:attempt,durationMs:Date.now()-requestedAt,error:errorDetails(error)});
       const serviceMessage = error?.data?.message || "";
       const isTemporaryFailure =
         error?.data?.status === 0 &&
@@ -361,12 +401,22 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES, video
         Date.now() + retryDelaySeconds * 1000 < deadline
       ) {
         transientFailures += 1;
-        firstRequest = true;
+        diagnostic('translation.retry', {poll:attempt,retry:transientFailures,delaySeconds:retryDelaySeconds});
         task.title = `⏳ Яндекс временно не смог перевести. Повтор через ${retryDelaySeconds} с (${transientFailures + 1}/3)`;
-        log(chalk.yellow(`   └─ ${getErrorMessage(error)}. Повтор через ${retryDelaySeconds} с.`));
+        waiting.update(`${getErrorMessage(error)}. Повтор через ${retryDelaySeconds} с.`);
         await sleep(retryDelaySeconds * 1000);
         continue;
       }
+      if (isTemporaryFailure && !cacheRestartUsed && Date.now() + 30_000 < deadline) {
+        cacheRestartUsed = true;
+        cacheRestartPending = true;
+        transientFailures = 0;
+        diagnostic('translation.restart', {provider:'yandex',reason:'repeated_service_failure',delaySeconds:30,bypassCache:true});
+        waiting.update('Яндекс повторно вернул ошибку. Через 30 с программа один раз запросит новый перевод без кэша.');
+        await sleep(30_000);
+        continue;
+      }
+      waiting.fail();
       return {
         success: false,
         urlOrError: getErrorMessage(error),
@@ -374,9 +424,13 @@ const translate = async (videoData, task, useLiveVoices = USE_LIVE_VOICES, video
     }
   }
 
+  waiting.fail();
+  diagnostic('translation.timeout', {polls:attempt,durationMs:Date.now()-startedAt});
   return {
     success: false,
-    urlOrError: `Translation timeout: exceeded ${TRANSLATION_TIMEOUT_SECONDS} seconds`,
+    urlOrError: process.env.VOT_LOCAL_UPLOAD_PATH
+      ? `Яндекс не выдал перевод локального файла за ${Math.round(TRANSLATION_TIMEOUT_SECONDS / 60)} мин. Исходный файл сохранён. Попробуйте позже; расчёт оставшегося времени сервисом оказался неточным.`
+      : `Translation timeout: exceeded ${TRANSLATION_TIMEOUT_SECONDS} seconds`,
   };
 };
 
@@ -456,7 +510,7 @@ async function main() {
   });
 
   // Красивый баннер при запуске (только в обычном режиме)
-  if (!QUIET_MODE && !JSON_MODE) {
+  if (!QUIET_MODE && !JSON_MODE && !QUEUE_WORKER) {
     console.log(
       chalk.cyan(
         "\n╔═══════════════════════════════════════════════════════════╗",
@@ -927,6 +981,7 @@ async function main() {
                       maxHeight: MAX_VIDEO_HEIGHT,
                       videoFormat: VIDEO_FORMAT,
                       thumbnailUrl: THUMBNAIL_URL,
+                      localVideoPath: process.env.VOT_LOCAL_MEDIA_PATH,
                       ...(proxyData?.proxyUrl
                         ? { proxyUrl: proxyData.proxyUrl }
                         : {}),
@@ -1093,6 +1148,7 @@ async function main() {
       }
 
       // Обычный режим с красивым UI
+      if (QUEUE_WORKER) return;
       console.log("");
       console.log(
         chalk.green(
@@ -1123,6 +1179,7 @@ async function main() {
       console.log("");
     }
   } catch (e) {
+    diagnostic('runtime.error', {error:errorDetails(e)});
     if (JSON_MODE) {
       console.log(
         JSON.stringify({ success: false, error: e.message }, null, 2),
@@ -1159,6 +1216,7 @@ async function main() {
 }
 
 await main().catch((e) => {
+  diagnostic('runtime.error', {error:errorDetails(e)});
   console.error(chalk.red("[VOT]", e));
   process.exitCode = 1;
 });

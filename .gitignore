@@ -169,3 +169,26 @@ bin/
 .env
 .env.*
 vot-console-state.json
+
+# Local accounts, queues, diagnostics and generated files
+.vot-cli-live/
+yandex-account*.json
+yandex-account.logout
+*.dpapi*
+*.session
+*.session-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.jsonl
+diagnostics/
+queues/
+queue.json
+item-*.json
+report.txt
+launcher-bin/
+.codex/
+.aws/
+credentials/
+secrets/
