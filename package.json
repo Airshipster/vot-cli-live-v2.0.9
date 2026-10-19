@@ -1,6 +1,6 @@
 {
   "name": "vot-cli-live",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Windows video translation with Yandex live voices, Microsoft Edge TTS, local files and resumable YouTube queues.",
   "type": "module",
   "main": "./src/index.js",

@@ -486,7 +486,7 @@ function Show-QualityOptions {
     }
     Write-Host 'Контейнер в списке — исходный; готовое видео сохраняется в MP4.'
     Write-Host 'В каждом варианте: оригинальный звук 15%, перевод 100%.'
-    Write-Host 'Для обложки YouTube первым кадром добавьте к номеру пробел и 000: например, 4 000. Перекодирование сохраняет примерно исходный размер видеопотока.'
+    Write-Host 'Для обложки первым кадром добавьте пробел и 000: например, 4 000. У H.264 перекодируется только начальный фрагмент; остальное видео копируется.'
 }
 
 function Get-DesktopResultPath {
@@ -660,7 +660,7 @@ do {
         Write-Host $(if ($isLocalVideo) { 'Получение перевода и сборка видео…' } else { 'Получение перевода и скачивание видео…' }) -ForegroundColor Cyan
         $votArguments = @($entryPoint, ('--voice-style=' + $selectedVoice), ('--lang=' + $sourceLanguage), ('--reslang=' + $selectedTarget), '--merge-video', ('--video-format=' + $selectedQuality.Selector), ('--video-title=' + $metadata.title), ('--video-duration=' + $metadata.duration), '--keep-original-audio=true', '--normalize-audio=false', '--original-volume=0.15', '--translation-volume=1', '--translation-timeout=900', ('--output=' + $jobRoot), '--output-file=video-ru')
         if ($addThumbnail) {
-            Write-Host 'Первый кадр: обложка YouTube. Видео будет перекодировано в H.264 с сохранением разрешения и частоты кадров.' -ForegroundColor Cyan
+            Write-Host 'Первый кадр: обложка YouTube. Подготовка без ограничения средним битрейтом всего ролика.' -ForegroundColor Cyan
             $votArguments += '--thumbnail-url=' + $thumbnailUrl
         }
         if ($selectedVoice -eq 'edge') {

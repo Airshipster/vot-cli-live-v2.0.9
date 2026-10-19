@@ -64,7 +64,7 @@ Args:
   --video-title — Original title, as supplied by the video player
   --video-duration — Original duration in seconds, as supplied by the video player
   --video-metadata — yt-dlp metadata JSON file (used for Microsoft subtitles)
-  --thumbnail-url — HTTPS image URL to replace the first video frame with the thumbnail (re-encodes video as H.264)
+  --thumbnail-url — HTTPS image URL for the first frame (H.264: encode opening GOP, copy the remainder)
   --tts-voice — Microsoft voice ID, e.g. ru-RU-SvetlanaNeural (with --voice-style=edge)
   --keep-original-audio — Keep original audio when merging (mix with translation. Default: true)
   --normalize-audio — Normalize audio levels for consistent volume (uses dynaudnorm. Default: true)

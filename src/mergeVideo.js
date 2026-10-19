@@ -5,6 +5,7 @@ import axios from "axios";
 import { createProgress } from "./progress.js";
 import { diagnostic, errorDetails } from "./diagnostics.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { prepareThumbnailVideo } from './thumbnailVideo.js';
 
 const executable = (variable, name) =>
   process.env[variable] || (process.platform === "win32" ? `${name}.exe` : name);
@@ -181,25 +182,24 @@ export async function measureVideoBitrate(videoPath, duration) {
 export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, options = {}) {
   const { keepOriginalAudio = true, audioVolume = 1, translationVolume = 1, normalizeAudio = true, thumbnailPath } = options;
   const { stdout } = await runTool(executable("VOT_FFPROBE_EXE", "ffprobe"), [
-    "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration,width,height", "-of", "json", videoPath,
+    "-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration,width,height,start_time,time_base,avg_frame_rate,has_b_frames,pix_fmt,sample_aspect_ratio,color_primaries,color_transfer,color_space,color_range,nb_frames", "-of", "json", videoPath,
   ], { timeout: 30_000 });
   const metadata = JSON.parse(stdout);
   const duration = Number(metadata.format?.duration);
   const video = metadata.streams?.find((stream) => stream.codec_type === "video");
   const videoDuration = Number(video?.duration) || duration;
-  let thumbnailBitrate;
-  const args = ["-hide_banner", "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1", "-i", videoPath, "-i", audioPath];
+  if (keepOriginalAudio && !metadata.streams?.some(stream => stream.codec_type === 'audio')) throw new Error('Не скачана оригинальная аудиодорожка.');
+  if (thumbnailPath && (!video?.width || !video?.height)) throw new Error('Не удалось определить размер кадра для обложки.');
+  const prepared = thumbnailPath ? await prepareThumbnailVideo(videoPath,thumbnailPath,metadata,
+    {run:runTool,ffmpeg:executable('VOT_FFMPEG_EXE','ffmpeg'),ffprobe:executable('VOT_FFPROBE_EXE','ffprobe'),directory:path.dirname(outputPath)}) : null;
+  const args = ["-hide_banner", "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1",
+    ...(prepared ? prepared.inputArgs : ['-i',videoPath]), '-i',audioPath];
+  if (prepared) args.push('-i',videoPath);
   const filters = [];
   let videoMap = "0:v:0";
-  if (thumbnailPath) {
-    if (!video?.width || !video?.height) throw new Error("Не удалось определить размер кадра для обложки.");
-    const analysis = createProgress("Измерение исходного битрейта");
-    analysis.update(NaN);
-    try {
-      thumbnailBitrate = await measureVideoBitrate(videoPath, videoDuration);
-      analysis.finish();
-    } catch (error) { analysis.fail(); throw error; }
-    if (!process.env.VOT_CLI_QUIET) console.log(`Обложка: целевой видеобитрейт ${Math.round(thumbnailBitrate / 1000)} кбит/с, как у исходного видеопотока.`);
+  if (thumbnailPath && !prepared) {
+    diagnostic('media.thumbnail.compatibility-encode',{codec:video.codec_name,qualityCrf:16});
+    if (!process.env.VOT_CLI_QUIET) console.log('Для этого кодека/таймлайна обложка требует полного перекодирования: используется контроль качества CRF 16 без ограничения средним битрейтом. Размер может увеличиться.');
     args.push("-i", thumbnailPath);
     filters.push(`[2:v:0]scale=${video.width}:${video.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
       `pad=${video.width}:${video.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[cover]`,
@@ -211,7 +211,7 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
     if (!metadata.streams?.some((stream) => stream.codec_type === "audio")) {
       throw new Error("Не скачана оригинальная аудиодорожка.");
     }
-    let filter = `[0:a:0]volume=${audioVolume}[original];` +
+    let filter = `[${prepared ? 2 : 0}:a:0]volume=${audioVolume}[original];` +
       `[1:a:0]volume=${translationVolume}[translation];` +
       "[original][translation]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]";
     filter += normalizeAudio
@@ -224,10 +224,10 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
   }
   if (filters.length) args.push("-filter_complex", filters.join(";"));
   args.push("-map", videoMap, "-map", audioMap);
-  if (thumbnailPath) args.push("-c:v", "libx264", "-preset", "fast", "-b:v", String(thumbnailBitrate),
-    "-maxrate", String(thumbnailBitrate * 2), "-bufsize", String(thumbnailBitrate * 4),
+  if (thumbnailPath && !prepared) args.push("-c:v", "libx264", "-preset", "slow", "-crf", "16",
     "-pix_fmt", "yuv420p", "-fps_mode", "passthrough");
   else args.push("-c:v", "copy");
+  if (prepared) args.push('-tag:v','avc3');
   args.push("-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", outputPath);
   const progress = createProgress(thumbnailPath ? "Обложка и сведение озвучки" : "Сведение озвучки");
   progress.update(0);
@@ -242,8 +242,24 @@ export async function mergeVideoWithAudio(videoPath, audioPath, outputPath, opti
         }
       },
     });
+    if (prepared) {
+      const {stdout:checkJson} = await runTool(executable('VOT_FFPROBE_EXE','ffprobe'), ['-v','error','-show_entries',
+        'stream=codec_type,duration,nb_frames,width,height','-of','json',outputPath],{diagnosticStage:'media.thumbnail.validate',timeout:60_000});
+      const resultVideo = JSON.parse(checkJson).streams.find(stream => stream.codec_type === 'video');
+      const [rateNum,rateDen] = (video.avg_frame_rate || '0/1').split('/').map(Number);
+      const tolerance = rateNum > 0 ? Math.max(0.05,rateDen / rateNum * 1.5) : 0.1;
+      if (!resultVideo || resultVideo.width !== video.width || resultVideo.height !== video.height ||
+          Math.abs(Number(resultVideo.duration)-videoDuration) > tolerance ||
+          (Number(video.nb_frames)>0 && Number(resultVideo.nb_frames)!==Number(video.nb_frames))) {
+        throw new Error('После вставки обложки изменились кадры или длительность. Результат не принят.');
+      }
+      await runTool(executable('VOT_FFMPEG_EXE','ffmpeg'), ['-hide_banner','-v','error','-xerror','-nostdin',
+        '-ss',String(Math.max(0,prepared.cut-0.5)),'-i',outputPath,'-t','2','-map','0:v:0','-an','-f','null','-'],
+      {diagnosticStage:'media.thumbnail.validate-join',timeout:60_000});
+    }
     progress.finish();
   } catch (error) { progress.fail(); throw error; }
+  finally { prepared?.cleanup(); }
 }
 
 export async function createVideoWithTranslation(videoUrl, audioPath, outputPath, options = {}) {
